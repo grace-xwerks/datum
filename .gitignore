@@ -37,3 +37,4 @@ outputs/
 
 # Claude Code per-machine permissions cache (regenerated on demand)
 .claude/settings.local.json
+logs/

@@ -23,7 +23,7 @@ sudo mkdir -p /opt/datum /var/lib/datum
 sudo chown datum:datum /opt/datum /var/lib/datum
 
 # Clone + install (console script datum-plex-mock-serve lands in .venv)
-sudo -u datum git clone https://github.com/grace-shane/Datum.git /opt/datum
+sudo -u datum git clone https://github.com/grace-xwerks/datum.git /opt/datum
 sudo -u datum python3 -m venv /opt/datum/.venv
 sudo -u datum /opt/datum/.venv/bin/pip install -e /opt/datum
 

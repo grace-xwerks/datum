@@ -53,10 +53,14 @@ repository. **Read these files in this order before doing anything**:
 - **Never bypass the production write guard.** Mutating HTTP methods on
   `connect.plex.com` are refused at `/api/plex/raw` unless
   `PLEX_ALLOW_WRITES=1` is explicitly set in the environment.
-- **Always run `pytest` before committing.** Branch protection on master
-  requires the `pytest` GitHub Actions check to pass before any merge.
+- **Always run `pytest` before committing.** Intended policy: branch
+  protection on master requires the `pytest` GitHub Actions check before any
+  merge. As of 2026-10-13 that is **not enforced** — Actions does not run on
+  this repo yet and no protection rule exists (see `docs/BRIEFING.md`
+  status snapshot), so the local run is the only gate.
 - **Use the `claude/<short-name>` branch naming convention** for new
-  branches off master, then auto-merge with `gh pr merge --auto --squash`.
+  branches off master, then merge with `gh pr merge --squash` (use `--auto`
+  only once repo auto-merge and a working required check are in place).
 - **Never ship the Supabase service role key to a browser.** It bypasses
   RLS. Server-side ingest scripts only.
 
@@ -73,6 +77,13 @@ py -m pytest
 gh pr create --base master --head claude/my-branch --title "..." --body "..."
 gh pr merge <number> --auto --squash
 ```
+
+> **Repo location.** This repo lives at `grace-xwerks/datum` (migrated from
+> the retired `grace-shane/Datum`; issue numbers changed — see the legend in
+> `TODO.md`). On a fresh clone `gh` defaults to the stale `upstream` remote,
+> so run `gh repo set-default grace-xwerks/datum` once, or pass
+> `--repo grace-xwerks/datum`. Local setup: `py -m venv .venv`, then
+> `.venv\Scripts\python -m pip install -r requirements-dev.txt`.
 
 ## Things this repo does NOT have
 

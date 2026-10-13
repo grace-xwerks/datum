@@ -1,9 +1,9 @@
 # Plex-Mimic Mock
 
 Local HTTP server mirroring the Plex REST surface for write-pipeline
-validation. Tracked in [#92](https://github.com/grace-shane/Datum/issues/92);
-blocks [#3](https://github.com/grace-shane/Datum/issues/3) and
-[#6](https://github.com/grace-shane/Datum/issues/6).
+validation. Tracked in #92;
+blocks [#1](https://github.com/grace-xwerks/datum/issues/1) (legacy #3) and
+[#4](https://github.com/grace-xwerks/datum/issues/4) (legacy #6).
 
 ## Quick start
 

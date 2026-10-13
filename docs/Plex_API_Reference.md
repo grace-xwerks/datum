@@ -27,7 +27,7 @@ All Plex APIs are routed through the developer portal. There is no session token
 
 `plex_api.py` honors a `PLEX_BASE_URL` environment variable that overrides
 both `BASE_URL` and `PLEX_USE_TEST`. Used by the write-validation
-workflow in [#92](https://github.com/grace-shane/Datum/issues/92) to
+workflow in #92 to
 point `datum-sync` at the local Plex-mimic mock
 (`tools/plex_mock/server.py`) instead of `connect.plex.com`. Unset in
 normal production operation.

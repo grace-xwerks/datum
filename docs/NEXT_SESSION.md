@@ -25,9 +25,13 @@ start/stop the instance. Document the expected monthly-cost delta
 (baseline ~$50/mo 24/7 → ~$15/mo weekday-only) in a short section at
 the bottom of docs/GCP_MIGRATION.md.
 
-Open a PR on grace-shane/Datum with --repo grace-shane/Datum (do not
+Open a PR on grace-xwerks/datum with --repo grace-xwerks/datum (do not
 rely on gh's default remote — it picks upstream, which is wrong).
 ```
+
+> **Status (2026-10-13):** Prompt 1 is done — `scripts/gcp/08-scheduler.sh`
+> landed in legacy PR #89. Prompt 2 (Supabase → Cloud SQL) has no trace in the
+> repo yet; confirm before starting it.
 
 ## Prompt 2 — Populate Supabase slots + migrate DB to Cloud SQL
 
@@ -62,7 +66,9 @@ pressing, look at TODO.md for the next unblocked GitHub issue.
 ## Gotchas this VM will hit
 
 - `gh` auto-picks the `upstream` remote (old `just-shane/plex-api` fork).
-  Always pass `--repo grace-shane/Datum`.
+  On a fresh clone run `gh repo set-default grace-xwerks/datum` once, or
+  always pass `--repo grace-xwerks/datum`. (The old `grace-shane/Datum` repo
+  no longer resolves; issue numbers changed in the move — see TODO.md.)
 - The `datum-runtime` VM holds `aps-refresh-token`; `datum-dev` does not
   (by IAM policy in `05-secrets.sh`). Don't try to read that secret from
   this machine.

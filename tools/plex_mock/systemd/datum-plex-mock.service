@@ -1,7 +1,7 @@
 [Unit]
 Description=Datum Plex-Mimic Mock HTTP Server
 After=network.target
-Documentation=https://github.com/grace-shane/Datum/issues/92
+Documentation=https://github.com/grace-xwerks/datum/tree/master/tools/plex_mock
 
 [Service]
 Type=simple

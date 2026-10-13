@@ -74,6 +74,13 @@ gh pr create --base master --head claude/my-branch --title "..." --body "..."
 gh pr merge <number> --auto --squash
 ```
 
+> **Repo location.** This repo lives at `grace-xwerks/datum` (migrated from
+> the retired `grace-shane/Datum`; issue numbers changed — see the legend in
+> `TODO.md`). On a fresh clone `gh` defaults to the stale `upstream` remote,
+> so run `gh repo set-default grace-xwerks/datum` once, or pass
+> `--repo grace-xwerks/datum`. Local setup: `py -m venv .venv`, then
+> `.venv\Scripts\python -m pip install -r requirements-dev.txt`.
+
 ## Things this repo does NOT have
 
 - A test environment for the Datum Plex app — production is the

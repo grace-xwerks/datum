@@ -1,7 +1,7 @@
 # GCP Migration — Datum
 
 **Status:** Planning (2026-04-17). No code changes in the session that wrote this doc.
-**Umbrella issue:** [#85](https://github.com/grace-shane/Datum/issues/85)
+**Umbrella issue:** [#7](https://github.com/grace-xwerks/datum/issues/7) (legacy #85)
 **Next-session prompts:** see [`NEXT_SESSION.md`](./NEXT_SESSION.md) for canned
 prompts covering Cloud Scheduler start/stop and the Supabase → Cloud SQL DB
 migration.

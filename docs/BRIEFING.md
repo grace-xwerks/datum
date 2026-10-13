@@ -29,11 +29,20 @@ them and pushes tooling data to Plex via REST API every night at midnight.
 
 ---
 
-## Repo: https://github.com/grace-shane/datum
+## Repo: https://github.com/grace-xwerks/datum
 
 Forked from just-shane/plex-api. Grace Engineering's working copy.
 
 Renamed from `plex-api` → `datum` on 2026-04-09.
+
+Migrated from `grace-shane/Datum` to the `grace-xwerks` org in July 2026 (the
+`grace-shane` account is retired; the old URL no longer resolves). Git history
+came across intact, but **issue numbers changed** and closed issues were not
+migrated. Legacy → current: #3→#1, #4→#2, #5→#3, #6→#4, #7→#5, #8→#6,
+#85→#7, #98–#104→#8–#14. Unlinked `#N` / `PR #N` references in this file
+(including the session log) use the **legacy** numbering; the PR numbers match
+the squash-commit subjects in `git log`. `gh` defaults to the `upstream`
+remote on a fresh clone — run `gh repo set-default grace-xwerks/datum`.
 
 ---
 
@@ -67,7 +76,7 @@ right now" and the running conversation about trade-offs.
   empirically by `GET /mdm/v1/tenants`
 - **Credentials**: Consumer Key + (optional) Secret in `.env.local`,
   loaded by `bootstrap.py` at startup. Gitignored.
-- **Key expires every 31 days** — see issue #12 for rotation cadence
+- **Key expires every 31 days** — see [#14](https://github.com/grace-xwerks/datum/issues/14) for rotation cadence
 - **Reads work** — `mdm/v1/tenants`, `mdm/v1/parts`, `mdm/v1/suppliers`,
   `purchasing/v1/purchase-orders` all return 200
 - **Writes are blocked** at the proxy by default (PR #17 production guard).
@@ -75,6 +84,21 @@ right now" and the running conversation about trade-offs.
 - **There is NO test environment for this app.** The Datum Consumer
   Key only authenticates against `connect.plex.com`, not `test.connect.plex.com`.
   Every action you take is against real production data.
+
+### Status snapshot — 2026-10-13
+
+Verified this date after a ~5-month gap (last functional commit: 2026-05-01,
+legacy PR #97; `master` has only gained `.gitattributes` since).
+
+| Area | State |
+|---|---|
+| **Tests** | `pytest`: **440 passed** locally (Python 3.14.3, Flask 3.1.3, pytest 9.1.1). |
+| **Web UI** | `npm ci && npm run build` succeeds. `npm run lint` reports **19 pre-existing errors** (10 `react-hooks/static-components`, 6 `no-empty`, 3 `react-refresh/only-export-components`); CI does not run lint. |
+| **Plex auth** | `plex_whoami` live check OK, tenant `58f781ba-…` matches, `allow_writes=false`. Key fingerprint differs from the stale shell-var key noted in the session log. Issue [#14](https://github.com/grace-xwerks/datum/issues/14) (rotation "due 2026-05-08") is **still open** even though auth works — rotation bookkeeping was not closed out. |
+| **Plex → Supabase mirror** (the `plex` schema behind the Plex MCP) | Partly fresh: `parts`, `supply_items`, `approved_suppliers`, `item_suppliers` and the production-history endpoints refreshed 2026-10-13; `buildings`, `containers`, `customers`, `locations`, `lots`, `operations`, `suppliers`, `workcenters` last ran **2026-08-18**; `/mdm/v1/part-operations` has one failed probe run (2026-06-17). |
+| **GitHub** | No open PRs; 14 open issues (#1–#14). Branch protection on `master` requires the `pytest` check, auto-merge enabled (set 2026-10-13). |
+| **Unmerged work on stale branches** | `claude/awesome-ishizaka`: `scripts/ingest_holders.py` and Scripts-page holder matching — the `holder_catalog` table has **no migration** in `db/migrations/` and no code on `master`. Other `claude/*` and `wip/*` branches are merged or superseded. |
+| **Not verified** | The live Supabase `datum` project (`crimblieyypiyarssoel`) — the Supabase MCP in use was bound to a different org. GRACE144 Task Scheduler runs. |
 
 ---
 
@@ -131,7 +155,7 @@ Fusion 360 tool libraries
          └── production/v1/production-definitions/workcenters  machine setup docs (per-id write — blocked on Classic API, #6)
 ```
 
-The nightly sync runs via the `sync.py` CLI (PR #44), scheduled on an always-on host (PR #47). Going forward, the GCP migration ([#85](https://github.com/grace-shane/Datum/issues/85)) will drop the ADC fallback entirely, replace Supabase with Cloud SQL, and move scheduling to Cloud Scheduler — see `docs/GCP_MIGRATION.md`.
+The nightly sync runs via the `sync.py` CLI (PR #44), scheduled on an always-on host (PR #47). Going forward, the GCP migration ([#7](https://github.com/grace-xwerks/datum/issues/7) (legacy #85)) will drop the ADC fallback entirely, replace Supabase with Cloud SQL, and move scheduling to Cloud Scheduler — see `docs/GCP_MIGRATION.md`.
 
 ### Industry hierarchy (Plex data model)
 
@@ -263,11 +287,18 @@ data. The older **Classic Web Services** at `plexonline.com` can access
 virtually the entire Classic schema via Data Sources (parameterized
 stored procedures).
 
-- **Endpoint:** `POST https://plexonline.com/Modules/Xmla/XmlDataSource.asmx`
+- **Endpoint (production):** `POST https://api.plexonline.com/DataSource/Service.asmx`
+  (test: `https://testapi.plexonline.com/DataSource/Service.asmx`). The
+  originally documented path `plexonline.com/Modules/Xmla/XmlDataSource.asmx`
+  is broken / non-functional for Grace — do not use it.
 - **WSDL:** append `?WSDL` to the endpoint URL
-- **Auth:** Web Service User account (username/password + Company Code).
-  **NOT the Developer Portal Consumer Key** — completely separate credentials.
-- **Format:** SOAP/XML (or JSON wrapper at `/api/datasources/{key}/execute`)
+- **Auth:** HTTP Basic with a dedicated **Web Service User** account
+  (username/password; Company Code may be needed). **NOT the Developer Portal
+  Consumer Key**, and not an IAM SSO login or the `g5ediadmin` portal admin —
+  both of those were tested on 2026-04-10 and **rejected**.
+- **Format:** SOAP 1.2/XML, `Content-Type: application/soap+xml`, namespace
+  `http://www.plexus-online.com/DataSource`, operation `ExecuteDataSource` with
+  an integer `DataSourceKey` (worked example in `docs/Plex_Classic_API_Request.md`)
 - **Licensing:** Included with base Plex subscription (no extra cost)
 - **ID format:** Integer keys (not UUIDs — mapping needed if mixing with REST API)
 
@@ -282,9 +313,10 @@ stored procedures).
 | Routing / op sequences | Routing data sources | 404 (`manufacturing/v1/routings`) |
 | Supply item cross-refs | Full supply item schema | 7 identity fields only |
 
-**Status:** Access request pending. See
+**Status:** Blocked on a Web Service user account — access request pending
+as of the last record (2026-04). See
 [`docs/Plex_Classic_API_Request.md`](./Plex_Classic_API_Request.md)
-for the request document.
+for the request document and the credential test results.
 
 ---
 
@@ -404,14 +436,14 @@ Sync filter: include only `type != "holder" AND type != "probe"`
 - `pytest` suite in `tests/`. CI on PRs to `master` via
   `.github/workflows/test.yml`. Branch protection on master requires the
   `pytest` check to pass before merge. Auto-merge enabled.
-- Currently 262 tests, all green (as of 2026-04-17).
+- Currently 440 tests, all green (as of 2026-10-13; 262 as of 2026-04-17).
 
 ---
 
 ## Immediate TODO (in priority order)
 
 All items below are mirrored as GitHub Issues — see
-https://github.com/grace-shane/Datum/issues for live status.
+https://github.com/grace-xwerks/datum/issues for live status.
 
 ### Done (historical record — kept for context)
 
@@ -442,7 +474,7 @@ https://github.com/grace-shane/Datum/issues for live status.
    Dry-run by default. Calls validate_library gate before every run.
 4. Error handling + logging on run failures — issue #8. `--log-file`
    scaffold landed in PR #46; issue remains open for broader error paths.
-5. GCP migration (umbrella [#85](https://github.com/grace-shane/Datum/issues/85))
+5. GCP migration (umbrella [#7](https://github.com/grace-xwerks/datum/issues/7) (legacy #85))
    — see `docs/GCP_MIGRATION.md` for scope, affected code, and sequence.
 
 ### Blocked on Plex Classic Web Services access

@@ -50,7 +50,7 @@ The original plan to write to `mdm/v1/parts` and `tooling/v1/tool-assemblies` wa
 1. **Clone and create your `.env.local`**
 
    ```powershell
-   git clone https://github.com/grace-shane/datum.git
+   git clone https://github.com/grace-xwerks/datum.git
    cd datum
    copy .env.example .env.local
    # Edit .env.local with your Datum Consumer Key + Secret
@@ -135,7 +135,7 @@ protect against accidental writes:
 - [`docs/validate_library_spec.md`](./docs/validate_library_spec.md) — design spec for the pre-sync
   validation gate; implemented as `validate_library.py` (#25)
 - [`TODO.md`](./TODO.md) — project roadmap mirrored to GitHub Issues
-- [GitHub Issues](https://github.com/grace-shane/datum/issues) — live status of every phase work
+- [GitHub Issues](https://github.com/grace-xwerks/datum/issues) — live status of every phase work
   item with dependencies and blockers
 - [Plex Manufacturing Cloud API docs](https://www.rockwellautomation.com/en-us/support/plex-manufacturing-cloud/api.html)
 

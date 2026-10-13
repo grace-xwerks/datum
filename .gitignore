@@ -1,6 +1,9 @@
 __pycache__/
 *.pyc
 
+# Local virtualenv
+.venv/
+
 # dotenv — local secrets, NEVER commit
 .env
 .env.local

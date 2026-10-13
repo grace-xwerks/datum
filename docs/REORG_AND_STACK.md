@@ -2,7 +2,7 @@
 
 **Status:** Planning (2026-04-17). No code changes in the session that wrote this doc.
 **Trigger:** Grace Engineering has provided Shane company-supplied GCP access and
-budget for Datum. That funds the [GCP migration epic #85](https://github.com/grace-shane/Datum/issues/85)
+budget for Datum. That funds the [GCP migration epic #7](https://github.com/grace-xwerks/datum/issues/7) (legacy #85)
 and opens room for stack changes that wouldn't have been justifiable on a
 zero-budget project.
 **Relationship to #85:** This plan executes *before* the GCP migration. The

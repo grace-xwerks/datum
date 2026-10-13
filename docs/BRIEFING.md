@@ -96,7 +96,7 @@ legacy PR #97; `master` has only gained `.gitattributes` since).
 | **Web UI** | `npm ci && npm run build` succeeds. `npm run lint` reports **19 pre-existing errors** (10 `react-hooks/static-components`, 6 `no-empty`, 3 `react-refresh/only-export-components`); CI does not run lint. |
 | **Plex auth** | `plex_whoami` live check OK, tenant `58f781ba-…` matches, `allow_writes=false`. Key fingerprint differs from the stale shell-var key noted in the session log. Issue [#14](https://github.com/grace-xwerks/datum/issues/14) (rotation "due 2026-05-08") is **still open** even though auth works — rotation bookkeeping was not closed out. |
 | **Plex → Supabase mirror** (the `plex` schema behind the Plex MCP) | Partly fresh: `parts`, `supply_items`, `approved_suppliers`, `item_suppliers` and the production-history endpoints refreshed 2026-10-13; `buildings`, `containers`, `customers`, `locations`, `lots`, `operations`, `suppliers`, `workcenters` last ran **2026-08-18**; `/mdm/v1/part-operations` has one failed probe run (2026-06-17). |
-| **GitHub** | No open PRs; 14 open issues (#1–#14). Branch protection on `master` requires the `pytest` check, auto-merge enabled (set 2026-10-13). |
+| **GitHub** | No open PRs (before this one); 14 open issues (#1–#14). **No branch protection** on `master`, and repo auto-merge is **off**. **GitHub Actions has never produced a run on this repo** (zero workflow runs; no `github-actions` check suite on new commits) although the `tests` workflow is registered and Actions is enabled at repo level — an org-level Actions policy is suspected (needs an org admin to inspect). Until that works, the local `pytest` run is the only test gate, and requiring the `pytest` check would deadlock every merge. |
 | **Unmerged work on stale branches** | `claude/awesome-ishizaka`: `scripts/ingest_holders.py` and Scripts-page holder matching — the `holder_catalog` table has **no migration** in `db/migrations/` and no code on `master`. Other `claude/*` and `wip/*` branches are merged or superseded. |
 | **Not verified** | The live Supabase `datum` project (`crimblieyypiyarssoel`) — the Supabase MCP in use was bound to a different org. GRACE144 Task Scheduler runs. |
 
@@ -434,8 +434,10 @@ Sync filter: include only `type != "holder" AND type != "probe"`
 
 ### Tests
 - `pytest` suite in `tests/`. CI on PRs to `master` via
-  `.github/workflows/test.yml`. Branch protection on master requires the
-  `pytest` check to pass before merge. Auto-merge enabled.
+  `.github/workflows/test.yml`. **Intended policy:** branch protection on
+  master requires the `pytest` check, auto-merge enabled. **Not in force as of
+  2026-10-13** — see the status snapshot: Actions is not running on this repo
+  and no protection rule exists. Run `pytest` locally before every merge.
 - Currently 440 tests, all green (as of 2026-10-13; 262 as of 2026-04-17).
 
 ---

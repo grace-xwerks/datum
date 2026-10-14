@@ -26,6 +26,10 @@ Infisical (``load_infisical``)
   Otherwise it is a silent no-op, like a missing .env.local.
 - Project id: ``DATUM_INFISICAL_PROJECT_ID``, else the identity file's
   ``projectId``. Environment: ``DATUM_INFISICAL_ENV`` (default ``dev``).
+- Folder: ``DATUM_INFISICAL_PATH``, else the identity file's ``path``,
+  else ``/datum``, passed as ``--path=`` to ``infisical export``. Datum's
+  keys live in the ``/datum`` folder of the shared Grace Engineering
+  project, so an unscoped export would pull in other tools' secrets.
 - Mints a short-lived token with ``infisical login --method=universal-auth``
   and reads the secrets with ``infisical export --format=json``. Every
   subprocess runs with stdin on DEVNULL and stdout captured — an Infisical
@@ -92,6 +96,7 @@ DEFAULT_CREDENTIAL_NAMES = (
 
 _DEFAULT_IDENTITY_FILE = Path.home() / ".config" / "datum" / "infisical-identity.json"
 _DEFAULT_INFISICAL_ENV = "dev"
+_DEFAULT_INFISICAL_PATH = "/datum"
 _INFISICAL_TIMEOUT = 60
 _DIAGNOSTIC_MAX = 240
 _PREFIX_LEN = 8
@@ -265,6 +270,8 @@ def _fetch_infisical() -> tuple[dict[str, str], str] | None:
             "no project id: set DATUM_INFISICAL_PROJECT_ID or add projectId "
             "to the identity file")
     environment = os.environ.get("DATUM_INFISICAL_ENV") or _DEFAULT_INFISICAL_ENV
+    folder = (os.environ.get("DATUM_INFISICAL_PATH") or identity.get("path")
+              or _DEFAULT_INFISICAL_PATH)
 
     login_env = dict(os.environ)
     login_env["INFISICAL_UNIVERSAL_AUTH_CLIENT_ID"] = client_id
@@ -279,7 +286,8 @@ def _fetch_infisical() -> tuple[dict[str, str], str] | None:
 
     res = _run_infisical(
         ["infisical", "export", "--format=json", "--silent",
-         f"--projectId={project_id}", f"--env={environment}", f"--token={token}"],
+         f"--projectId={project_id}", f"--env={environment}", f"--path={folder}",
+         f"--token={token}"],
         dict(os.environ), "export")
     if res.returncode != 0:
         raise _InfisicalError(

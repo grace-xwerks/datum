@@ -78,8 +78,15 @@ right now" and the running conversation about trade-offs.
 - **Environment**: `https://connect.plex.com` — **PRODUCTION**, real Grace data
 - **Tenant**: `58f781ba-1691-4f32-b1db-381cdb21300c` (`Grace`) — verified
   empirically by `GET /mdm/v1/tenants`
-- **Credentials**: Consumer Key + (optional) Secret in `.env.local`,
-  loaded by `bootstrap.py` at startup. Gitignored.
+- **Credentials**: Consumer Key + (optional) Secret, loaded by `bootstrap.py`
+  at startup from three sources, **shell env > Infisical > `.env.local`**.
+  Infisical (Grace Engineering project, folder `/datum`, envs `dev`/`prod`) is
+  the source of truth and is read locally through the machine-identity file
+  `~/.config/datum/infisical-identity.json`; `.env.local` (gitignored) is the
+  local fallback; the nightly GitHub Actions runner uses plain repo secrets
+  synced from Infisical `prod`. Rollout status is in the 2026-10-14 snapshot
+  below (the Infisical folder, GitHub sync and token seed are Shane's steps and
+  were still pending at that snapshot). Full reference: [`docs/SECRETS.md`](./SECRETS.md).
 - **Key expires every 31 days** — see [#14](https://github.com/grace-xwerks/datum/issues/14) for rotation cadence
 - **Reads work** — `mdm/v1/tenants`, `mdm/v1/parts`, `mdm/v1/suppliers`,
   `purchasing/v1/purchase-orders` all return 200
@@ -109,10 +116,11 @@ legacy PR #97; `master` has only gained `.gitattributes` since).
 | Area | State |
 |---|---|
 | **Supabase `datum` project** | Verified via the Supabase MCP (re-bound to the Grace org). Healthy, Postgres 17, 15 migrations applied (latest three dated 2026-10-13: `item_suppliers`, `approved_suppliers`, `supply_items_widen`). `public`: `libraries` 7, `tools` 155, `cutting_presets` 631, `reference_catalog` 85,306, `holder_catalog` 405, `plex_supply_items` 0. `plex` mirror: all 12 master tables refreshed 2026-10-14 13:25 UTC; production-history tables run daily at 06:00 UTC via pg_cron → edge function, last OK 2026-10-14. The "last ran 2026-08-18" note above is superseded. |
-| **Nightly Fusion → Supabase sync** | **Dead since 2026-04-10.** Every `libraries.ingested_at` equals 2026-04-10 15:26 UTC and `source_modified_at` is NULL everywhere, so the GRACE144 "Datum Nightly Sync" task has not written since the day it was deployed. No tools are linked to Plex and `qty_synced_at` is NULL throughout. Tracked in [#18](https://github.com/grace-xwerks/datum/issues/18). |
+| **Nightly Fusion → Supabase sync** | **Dead since 2026-04-10.** Every `libraries.ingested_at` equals 2026-04-10 15:26 UTC and `source_modified_at` is NULL everywhere, so the GRACE144 "Datum Nightly Sync" task has not written since the day it was deployed. No tools are linked to Plex and `qty_synced_at` is NULL throughout. Tracked in [#18](https://github.com/grace-xwerks/datum/issues/18); the Actions replacement landed later the same day (see the "Infisical + Actions sync" row below). |
 | **GitHub Actions** | **Root cause found.** The repo was created on 2026-05-01 as a *fork* of `just-shane/plex-api`, and GitHub disables workflows on forks until a repo admin clicks "enable" on the Actions tab. Not an org policy: repo-level Actions was already enabled with all actions allowed, the `tests` workflow was `active`, and the repo is public (unlimited minutes). Shane enabled the workflows on 2026-10-14; PR #20 (new-repo numbering) was the first run (pull_request 20s, push 15s, both green). **Then set the same day:** branch protection on `master` requiring the `pytest` context (strict=false, no reviews, enforce_admins=false, no force-push/deletion) and repo `allow_auto_merge=true`. Shane then left the fork network the same day; the `upstream` remote was removed from the local clone and the `gh repo set-default` warnings dropped from CLAUDE.md / BRIEFING. |
 | **GCP migration (#7)** | **Abandoned.** Project `datum-prod-493615` has billing disabled, its VMs are gone, and neither of Shane's Google accounts has IAM on it; deletion requested of a Grace admin 2026-10-14. `scripts/gcp/` and `docs/NEXT_SESSION.md` removed. See the banner in `docs/GCP_MIGRATION.md`. |
-| **Issues opened** | [#16](https://github.com/grace-xwerks/datum/issues/16) Infisical secrets, [#17](https://github.com/grace-xwerks/datum/issues/17) port holder-catalog work from `claude/awesome-ishizaka`, [#18](https://github.com/grace-xwerks/datum/issues/18) nightly sync → GitHub Actions. |
+| **Issues opened** | [#16](https://github.com/grace-xwerks/datum/issues/16) Infisical secrets, [#17](https://github.com/grace-xwerks/datum/issues/17) port holder-catalog work from `claude/awesome-ishizaka`, [#18](https://github.com/grace-xwerks/datum/issues/18) nightly sync → GitHub Actions. Follow-up [#28](https://github.com/grace-xwerks/datum/issues/28): keep the Infisical access token off argv. |
+| **Infisical + Actions sync (evening)** | **Code landed, rollout not finished.** PRs #23 (design spec), #24 (`bootstrap.load_infisical` + `describe_sources`), #25 (pluggable APS token store), #26 (`sync.py` no silent local fallback; `run_dev.py` skips Infisical-sourced keys; `credential_sources` in `tenant_whoami`), #27 (spec amended after the Infisical billing review), #29 (`.github/workflows/nightly-sync.yml`), #30 (`SupabaseTokenStore`, `datum-aps-consent --store`, `DATUM_INFISICAL_PATH`, migration `0008_runtime_state.sql`). **583 tests** pass (was 440). Migration 0008 is applied to the datum Supabase project (`public.runtime_state`, RLS on, no policies). **Billing decision:** Infisical is on Legacy Pro at $18 per identity; identities went 6 → 3 the same day (Shane, `github-actions-capitoltrace`, `grace-workstation-shane`, the last being `plex-mcp-workstation-shane` renamed, rename pending on Shane's side). Datum adds **zero** identities and no new Infisical project: its 7 keys go in folder `/datum` of Grace Engineering (`8e04285d-bdf4-4836-b1d6-f2d026e1574a`), and the rotating APS refresh token lives in a Supabase row instead of Infisical. **Still to do (Shane):** create `/datum` + the 7 keys in `dev` and `prod`; rename the identity and copy its file to `~/.config/datum/`; create GitHub secret sync `datum-secret-sync` (`prod` `/datum` → this repo); seed the token with `datum-aps-consent`; then a `dry_run` dispatch, a real dispatch, and the first scheduled run. After that the GRACE144 jobs ("Datum Nightly Sync" 00:00, "Datum Nightly Inventory Sync" 00:30) are disabled, then deleted with that host's `.env.local` and `.aps_tokens.json`. [#16](https://github.com/grace-xwerks/datum/issues/16) and [#18](https://github.com/grace-xwerks/datum/issues/18) stay open until that completes. See [`docs/SECRETS.md`](./SECRETS.md). |
 
 ---
 
@@ -129,7 +137,8 @@ The Insomnia Generate Code output for a working request shows only the
 key + tenant headers. The secret may be needed in some configurations
 (future-proof, harmless to send), but is not currently required.
 
-Credentials are loaded from `.env.local` via `bootstrap.py`.
+Credentials are loaded by `bootstrap.py` from shell env, Infisical, then
+`.env.local` (in that order of precedence; see `docs/SECRETS.md`).
 **Never hardcode credentials. Never commit credentials.**
 
 ### Tenants
@@ -169,7 +178,7 @@ Fusion 360 tool libraries
          └── production/v1/production-definitions/workcenters  machine setup docs (per-id write — blocked on Classic API, #6)
 ```
 
-The nightly sync runs via the `sync.py` CLI (PR #44), scheduled on GRACE144 Task Scheduler (PR #47) — **but it has not written since 2026-04-10** (see the 2026-10-14 status snapshot). [#18](https://github.com/grace-xwerks/datum/issues/18) moves it to GitHub Actions and drops the ADC fallback; [#16](https://github.com/grace-xwerks/datum/issues/16) moves secrets to Infisical. The GCP migration (#7) was **abandoned on 2026-10-14** — `docs/GCP_MIGRATION.md` is a historical record only. Supabase stays.
+The nightly sync runs via the `sync.py` CLI (PR #44). It was scheduled on GRACE144 Task Scheduler (PR #47) — **but that host has not written since 2026-04-10** (see the 2026-10-14 status snapshot). Its replacement is `.github/workflows/nightly-sync.yml` on GitHub Actions ([#18](https://github.com/grace-xwerks/datum/issues/18), code merged; rollout pending), which also drops the silent local-ADC fallback; secrets move to Infisical ([#16](https://github.com/grace-xwerks/datum/issues/16), same state). The GCP migration (#7) was **abandoned on 2026-10-14** — `docs/GCP_MIGRATION.md` is a historical record only. Supabase stays.
 
 ### Industry hierarchy (Plex data model)
 
@@ -392,7 +401,10 @@ Sync filter: include only `type != "holder" AND type != "probe"`
 ### aps_client.py (PR #43)
 - OAuth client for Autodesk Platform Services (Fusion Hub online)
 - Lists hub projects and downloads tool library JSON over HTTP
-- Primary source for `sync.py`; removes the ADC install requirement on the runtime host
+- The only source for `sync.py` without `--local`; removes the ADC install requirement on the runtime host
+- Pluggable token store, chosen by `APS_TOKEN_STORE` (PRs #25, #30): `file` (default; `.aps_tokens.json`, local dev), `supabase` (production: `SupabaseTokenStore` on the `public.runtime_state` row `aps_refresh_token`, RLS on with no policies so service role only, written back on every rotation before any API call uses the new token, old value kept in `previous_value`), `infisical` (`InfisicalTokenStore`, kept but not default: an Infisical identity on the runner would cost a seat)
+- The APS refresh token is **single-use and rotates on every refresh** (15-day idle expiry), so production has exactly one consumer: the nightly runner. A rejected refresh raises "refresh token rejected — re-seed with datum-aps-consent"
+- Seeded and re-seeded with `datum-aps-consent` (`scripts/aps_consent.py`; `--store supabase|infisical`, default `supabase`). Runbook: [`docs/SECRETS.md`](./SECRETS.md)
 
 ### validate_library.py (PR #28, spec: `docs/validate_library_spec.md`)
 - Pre-sync validation gate — FAIL aborts the sync; WARNs surface in verbose/debug
@@ -402,7 +414,7 @@ Sync filter: include only `type != "holder" AND type != "probe"`
 
 ### supabase_client.py + sync_supabase.py (PR #32)
 - Dedicated Supabase project (`datum`, us-east-2): `libraries` / `tools` / `cutting_presets`
-- `SUPABASE_URL` + `SUPABASE_SERVICE_ROLE_KEY` in `.env.local` — server-side only, never shipped to the browser
+- `SUPABASE_URL` + `SUPABASE_SERVICE_ROLE_KEY` (Infisical `/datum`, `.env.local` fallback) — server-side only, never shipped to the browser
 - Full tool record (geometry, holders, pockets) lives here; Plex gets the identity slice via `build_supply_item_payload` (#3)
 - PR #34 dropped the `fusion2plex_` table prefix once DB isolation made it redundant
 - Was scheduled for replacement by Cloud SQL under the GCP migration epic (#85); that epic was **abandoned 2026-10-14** and Supabase is the permanent staging/cache store
@@ -415,21 +427,60 @@ Sync filter: include only `type != "holder" AND type != "probe"`
 - `plex_supply_items` staging table + payload computation
 - Feeds the upsert path in #3
 
-### sync.py + nightly deploy (PRs #44, #46, #47)
-- `sync.py` CLI entrypoint, APS-first with local ADC fallback
-- `--log-file` flag for persistent nightly logs (PR #46)
-- Deployed to an always-on host; scheduled nightly at midnight (PR #47)
+### sync.py + nightly deploy (PRs #44, #46, #47, #26, #29, #30)
+- `sync.py` CLI entrypoint (`datum-sync`); `--log-file` for persistent logs (PR #46)
+- **APS is the only source without `--local`** (PR #26). A config or auth failure logs one `CRITICAL` line naming the cause and exits 2; it no longer falls back to the local ADC files, which hid a dead token. `--local` is explicit and keeps its 25-hour stale-file guard. Exit codes: 0 all synced, 1 some libraries failed, 2 fatal / nothing processed. Startup logs the "Credential sources:" table
+- **Scheduler: GitHub Actions** (`.github/workflows/nightly-sync.yml`, PR #29): cron `17 5 * * *` UTC (00:17 America/Chicago in CDT) plus `workflow_dispatch` with a `dry_run` input. It runs `datum-sync` then `datum-sync-inventory`, reads only repo secrets (synced from Infisical `prod` `/datum` by `datum-secret-sync`), sets `APS_TOKEN_STORE=supabase` and `DATUM_DISABLE_INFISICAL=1`, and has no Infisical CLI or identity. Failures are red runs with a step summary and a 14-day log artifact. A `--dry-run` still rotates the APS refresh token (the refresh consumes the old one)
+- **Retired:** the GRACE144 Task Scheduler jobs (PR #47: "Datum Nightly Sync" 00:00, "Datum Nightly Inventory Sync" 00:30). They have not written since 2026-04-10. To be disabled after the first green scheduled Actions run, then deleted together with that host's `.env.local` and `.aps_tokens.json`
+- Runbook for red runs, token seeding and rotation: [`docs/SECRETS.md`](./SECRETS.md)
 
 ### React UI (PR #41 + successive)
 - Tool browser, library browser, Scripts page, last-sync indicator, qty columns
 - Deployed to Cloudflare Workers Static Assets (PR #70)
 
 ### bootstrap.py
-- Loads `.env.local` (gitignored) into `os.environ` via `setdefault`
-  semantics — real shell env vars always win
+- **Three-source loader** (PRs #24, #30): shell env > Infisical > `.env.local`, all
+  via `setdefault`, so real shell env vars always win and a key in both
+  Infisical and `.env.local` takes the Infisical value. On import,
+  `load_infisical()` runs, then `load_env_local()` (gitignored file)
+- `load_infisical()` runs only when `DATUM_DISABLE_INFISICAL` is unset and a
+  machine identity exists: `~/.config/datum/infisical-identity.json`
+  (`clientId`, `clientSecret`, `projectId`, optional `path`;
+  `DATUM_INFISICAL_IDENTITY_FILE` overrides the location) or
+  `INFISICAL_UNIVERSAL_AUTH_CLIENT_ID/SECRET` in the environment. Settings:
+  `DATUM_INFISICAL_PROJECT_ID`, `DATUM_INFISICAL_ENV` (default `dev`),
+  `DATUM_INFISICAL_PATH` (default `/datum`). It shells out to the `infisical`
+  CLI (`login`, then `export`) with stdin closed. Any failure is one WARNING
+  and a return of 0; import never raises and never writes to stdout
+- `describe_sources()` / `format_sources()` report, per credential, which
+  source won (`shell`, `infisical`, `.env.local`, `unset`) plus an 8-character
+  prefix and length, never more. `sync.py` logs it at startup and
+  `tenant_whoami` returns it as `credential_sources`. This implements the
+  lesson of History §4
+- `run_dev.py` still forces `.env.local` over stale shell variables, but skips
+  keys that Infisical supplied
 - Imported at the very top of `plex_api.py` so credential reads happen
-  AFTER the file is loaded
-- Tested in `tests/test_bootstrap.py` (16 tests)
+  AFTER the loaders have run
+- Tested in `tests/test_bootstrap.py` (63 tests); `tests/conftest.py` sets
+  `DATUM_DISABLE_INFISICAL=1` so no subprocess runs under pytest
+
+### Secrets (summary; full reference in [`docs/SECRETS.md`](./SECRETS.md))
+
+All under folder `/datum` of the Grace Engineering Infisical project, envs
+`dev` and `prod`; the GitHub secret has the same name.
+
+| Key | Consumer | Notes |
+|---|---|---|
+| `PLEX_API_KEY` | `plex_api.py` | Rotates every 31 days (#14) |
+| `PLEX_API_SECRET` | `plex_api.py` | Optional today |
+| `PLEX_TENANT_ID` | `plex_api.py` | Not secret; code default is the Grace tenant |
+| `SUPABASE_URL` | `supabase_client.py` | Not secret |
+| `SUPABASE_SERVICE_ROLE_KEY` | `supabase_client.py` | Bypasses RLS; server-side only |
+| `APS_CLIENT_ID`, `APS_CLIENT_SECRET` | `aps_client.py` | APS app credentials |
+| `APS_REFRESH_TOKEN` | `SupabaseTokenStore` | **Not in Infisical.** Row `aps_refresh_token` in `public.runtime_state` |
+
+Never stored anywhere: `PLEX_ALLOW_WRITES`, `PLEX_BASE_URL`, any `INFISICAL_*`
+credential on the runner.
 
 ### app.py + templates/static
 - Flask endpoint tester UI at http://localhost:5000
@@ -453,7 +504,7 @@ Sync filter: include only `type != "holder" AND type != "probe"`
   2026-10-14** (strict up-to-date not required, no review requirement,
   `enforce_admins` off so an admin can bypass in an emergency, force-push and
   deletion blocked). Run `pytest` locally before every push regardless.
-- Currently 440 tests, all green (as of 2026-10-13; 262 as of 2026-04-17).
+- Currently **583 tests**, all green (as of 2026-10-14; 440 on 2026-10-13, 262 on 2026-04-17). Run them with the repo venv, `.venv\Scripts\python -m pytest`: bare `py` lacks Flask on Shane's machine.
 
 ---
 
@@ -545,10 +596,12 @@ Portal Consumer Key). Access request doc:
   query param** — empirically verified. `?limit=1` returns the entire
   database (19.6 MB and 44 MB respectively). Always include a real filter
   like `status=Active` and a date range.
-- **`PLEX_API_KEY` / `PLEX_API_SECRET` come from `.env.local`** via
-  `bootstrap.py`. A real shell env var with the same name will OVERRIDE
-  `.env.local` via `setdefault` semantics — clear stale shell vars if you
-  have them. (See History §1 for the painful version of this lesson.)
+- **`PLEX_API_KEY` / `PLEX_API_SECRET` come from Infisical or `.env.local`**
+  via `bootstrap.py` (shell env > Infisical > `.env.local`). A real shell env
+  var with the same name will OVERRIDE both via `setdefault` semantics — clear
+  stale shell vars if you have them, and check `credential_sources` (or
+  `bootstrap.format_sources()`) to see which source won. (See History §1 and
+  §4 for the painful version of this lesson.)
 - **The previously hardcoded API key (`k3SmLW3y…`) is dead.** It's in git
   history but no longer authenticates anywhere.
 - **Plex returns 401 `REQUEST_NOT_AUTHENTICATED` for both bad credentials
@@ -667,13 +720,17 @@ key value (first 8 chars + length + first-source — env var or .env.local)
 is being used. We should also probably make `bootstrap.py` log when
 `.env.local` is being shadowed by an existing env var.
 
+*Implemented 2026-10-14 (PR #24): `bootstrap.describe_sources()` /
+`format_sources()`, surfaced as `credential_sources` in `tenant_whoami` and as
+the "Credential sources:" block `sync.py` logs at startup.*
+
 ---
 
 ## Session log
 
 Reverse chronological. Each entry: what was the goal, what landed, what's left.
 
-### 2026-10-14 — Supabase verified, nightly sync found dead, GCP cutover abandoned
+### 2026-10-14 — Supabase verified, nightly sync found dead, GCP cutover abandoned, Infisical + Actions sync built
 
 **Goal:** Re-orient after the 2026-10-13 docs sweep, verify the Supabase side
 now that the MCP is bound to the right org, and decide what to do about the
@@ -691,9 +748,37 @@ half-provisioned GCP migration.
   Closed #7, removed `scripts/gcp/` + `docs/NEXT_SESSION.md`, banner on
   `docs/GCP_MIGRATION.md`, reframed `docs/REORG_AND_STACK.md`, trimmed the
   GCP steps out of #14.
+- Found why Actions was silent (repo created as a fork; workflows disabled
+  until a repo admin enables them), enabled it, turned on branch protection
+  (`pytest` required) and auto-merge, and left the fork network (see the
+  status snapshot).
+- Evening: designed and built Infisical secrets + the nightly sync on GitHub
+  Actions (spec `docs/superpowers/specs/2026-10-14-infisical-and-actions-sync-design.md`,
+  PR #23). An Infisical billing review (Legacy Pro, $18 per identity; identities
+  6 → 3) reshaped it: zero new identities, no new project, Datum's 7 keys in
+  folder `/datum` of Grace Engineering, and the rotating APS refresh token in a
+  Supabase row (spec amended, PR #27). Five code PRs landed: #24 `bootstrap`
+  Infisical loader + `describe_sources`, #25 pluggable APS token store +
+  `datum-aps-consent`, #26 `sync.py` no silent local fallback + Infisical
+  precedence in `run_dev.py` + `credential_sources`, #29
+  `.github/workflows/nightly-sync.yml`, #30 `SupabaseTokenStore` +
+  `runtime_state` migration (0008, applied) + `datum-aps-consent --store` +
+  `DATUM_INFISICAL_PATH`. Tests 440 → 583. New operator doc `docs/SECRETS.md`
+  and the credential rules in CLAUDE.md / README updated.
 
-**What's left:** #18 is the most urgent (the sync is dead). #16 before #18's
-secrets step. Actions still produces no runs on this repo — org admin needed.
+**What's left:** the sync is still dead until the rollout finishes, so this is
+the most urgent item. Shane: create `/datum` + the 7 keys in Grace Engineering
+(`dev`, `prod`); rename `plex-mcp-workstation-shane` → `grace-workstation-shane`
+and copy its identity file to `~/.config/datum/`; create GitHub secret sync
+`datum-secret-sync`; run `datum-aps-consent` once. Then a `dry_run`
+`workflow_dispatch`, a real dispatch (watch `libraries.ingested_at` advance),
+and the first scheduled run. After that, disable then delete the two GRACE144
+Task Scheduler jobs and that host's `.env.local` + `.aps_tokens.json`. Then
+close [#16](https://github.com/grace-xwerks/datum/issues/16) and
+[#18](https://github.com/grace-xwerks/datum/issues/18) by hand and update the
+Notion Current State block and Decision Log. Follow-up:
+[#28](https://github.com/grace-xwerks/datum/issues/28) (Infisical access token
+off argv).
 
 ### 2026-04-09 — Postman buildout + connectivity sweep + supply-item cross-ref finding
 

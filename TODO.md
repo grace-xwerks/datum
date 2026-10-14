@@ -58,8 +58,8 @@ This document outlines the step-by-step implementation plan for the Autodesk Fus
 ## Phase 5: Automation & Deployment
 
 - [x] **DONE (PR #44).** Finalize the synchronization script — `sync.py` nightly CLI entrypoint + `pyproject.toml` packaging. → #9 *(closed)*
-- [x] **DONE (PR #47).** Deploy the script — nightly sync runs on an always-on host. → #10 *(closed)*
-- [x] **DONE (PR #47).** Schedule the script to run nightly at midnight. → #11 *(closed)*
+- [x] **DONE (PR #47).** Deploy the script — nightly sync runs on an always-on host. → #10 *(closed)* **Superseded 2026-10-14:** the GRACE144 host has not written since 2026-04-10 and is being retired in favour of GitHub Actions ([#18](https://github.com/grace-xwerks/datum/issues/18); `.github/workflows/nightly-sync.yml` has landed, rollout pending). See [`docs/SECRETS.md`](./docs/SECRETS.md).
+- [x] **DONE (PR #47).** Schedule the script to run nightly at midnight. → #11 *(closed)* **Superseded 2026-10-14:** the Task Scheduler jobs ("Datum Nightly Sync" 00:00, "Datum Nightly Inventory Sync" 00:30) are to be disabled after the first green scheduled Actions run, then deleted ([#18](https://github.com/grace-xwerks/datum/issues/18)).
 - [x] **DONE (PR #33).** Rotate the Plex API key — old key from git history no longer authenticates; the `Datum` Consumer Key is current. Next rotation deadline 2026-05-08 tracked separately. → #12 *(closed)*
 
 ---

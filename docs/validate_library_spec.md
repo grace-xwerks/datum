@@ -14,6 +14,52 @@ aborts the sync. WARNs are surfaced in verbose/debug modes and the Flask UI.
 
 ---
 
+## Stages
+
+*Added 2026-10-14.* The same library is validated for two different
+destinations, and the rules that only matter to Plex should not stop a write
+to Supabase. `validate_library(..., stage=ValidationStage.X)` (CLI:
+`--stage {plex,staging}`) selects the rule set.
+
+| Stage | Destination | Dedup key | Used by |
+|---|---|---|---|
+| `PLEX` (default) | Plex supply-item write | `product-id` | CLI default, `tool_library_loader.load_library(validate=True)`, `/api/fusion/validate` |
+| `STAGING` | Supabase upsert (`tools`, `cutting_presets`) | `fusion_guid` | `sync.py` (nightly job, both the APS and `--local` paths) |
+
+**Why.** The gate was written for the Plex write, so a missing `product-id`,
+a missing `description` and a duplicate `product-id` were FAILs. The nightly
+job writes to Supabase, which dedups on `fusion_guid`, accepts an empty
+`product_id` (57 of the 155 rows in the live `tools` table have one) and an
+empty `description` (the Scripts page exists to fill those in). The Plex
+stage (`populate_supply_items.py`) already skips any tool with no
+`product_id`. With PLEX rules every one of the 10 Fusion libraries failed the
+gate, so the nightly sync never succeeded after the gate landed in April; the
+first GitHub Actions dry run (run 38623375506) ended "0 succeeded,
+3 skipped, 10 failed" on these rules alone.
+
+**What changes at STAGING.** Exactly three checks drop from FAIL to WARN.
+Their message keeps the PLEX text and gains a suffix so a log reader can see
+why the issue did not fail the library:
+
+| Rule | Field | PLEX | STAGING | Suffix appended at STAGING |
+|---|---|---|---|---|
+| `REQUIRED_FIELD` | `product-id` | FAIL | **WARN** | `(staging: warn only; Plex stage will skip this tool)` |
+| `REQUIRED_FIELD` | `description` | FAIL | **WARN** | `(staging: warn only; Supabase accepts an empty description — fix it on the Scripts page before the Plex push)` |
+| `DUPLICATE_PRODUCT_ID` | `product-id` | FAIL | **WARN** | `(staging: warn only; Supabase dedups on fusion_guid — resolve before the Plex push)` |
+
+Every other rule has the same severity at both stages: `REQUIRED_FIELD` for
+`guid` and `type`, `DUPLICATE_GUID`, `GEOMETRY_DC_NONPOSITIVE`,
+`GEOMETRY_NOF_NONPOSITIVE`, `SYNC_CANDIDATES_ZERO` and all `STRUCT_*` rules
+stay FAIL; all WARN rules stay WARN. `DUPLICATE_PRODUCT_ID` never blocked
+per-tool iteration and still does not at either stage.
+
+The stage is recorded on `ValidationResult.stage`, included in `to_dict()`
+as `"stage"`, and shown in `summary()` / CLI output as `[stage: plex]` or
+`[stage: staging]`. `sync.py` logs `validation stage: staging` once at
+startup.
+
+---
+
 ## File Location
 
 ```
@@ -56,7 +102,13 @@ python validate_library.py --debug
 
 # Skip the live Plex supplier lookup (offline mode)
 python validate_library.py --no-api
+
+# Validate for the Supabase upsert instead of Plex (see "Stages")
+python validate_library.py --stage staging     # default: --stage plex
 ```
+
+The CLI prints `Validation stage: <stage>` once before the per-library
+results, and each result line carries `[stage: <stage>]`.
 
 **Exit codes:**
 
@@ -93,6 +145,10 @@ successfully parsed data.
 
 `use_api=False` is the default in the loader to keep it fast and offline-safe.
 API vendor validation is an explicit opt-in from the CLI or Flask.
+
+`stage` defaults to `ValidationStage.PLEX`; the loader and the Flask route
+use the default. `sync.py` validates its own libraries (it calls the loader
+with `validate=False`) and passes `stage=ValidationStage.STAGING`.
 
 ---
 
@@ -157,6 +213,17 @@ class ValidationMode(Enum):
     DEBUG      = "debug"        # + field trace
 ```
 
+### `ValidationStage` enum
+
+```python
+class ValidationStage(str, Enum):
+    PLEX    = "plex"      # Plex supply-item write — product-id is the dedup key
+    STAGING = "staging"   # Supabase upsert (sync.py) — fusion_guid is the dedup key
+```
+
+Orthogonal to `ValidationMode`: the mode controls how much is shown, the
+stage controls which rule severities apply. See "Stages".
+
 ### `ValidationIssue` dataclass
 
 ```python
@@ -182,6 +249,7 @@ class ValidationResult:
     sync_candidate_count: int   # count after filtering holders + probes
     issues: list[ValidationIssue]
     debug_trace: list[str] | None
+    stage: ValidationStage      # default PLEX
 
     def summary(self) -> str: ...     # single-line human-readable string
     def to_dict(self) -> dict: ...    # Flask JSON response
@@ -226,8 +294,13 @@ In debug mode, skipped checks are logged:
 
 ## Rule Table
 
-Rules run in this order. **Library-level rules run first.** If any library-level
-rule FAILs, per-tool rules are skipped — there is nothing safe to iterate.
+Rules run in this order. **Library-level rules run first.** If a structural
+library-level rule (`STRUCT_*`, `SYNC_CANDIDATES_ZERO`) FAILs, per-tool rules
+are skipped — there is nothing safe to iterate. `DUPLICATE_GUID` and
+`DUPLICATE_PRODUCT_ID` do not block per-tool rules.
+
+The **Severity** column is the `PLEX` (default) stage. Where the `STAGING`
+stage differs it is noted as "PLEX: FAIL / STAGING: WARN"; see "Stages".
 
 ---
 
@@ -240,7 +313,7 @@ rule FAILs, per-tool rules are skipped — there is nothing safe to iterate.
 | `STRUCT_EMPTY` | FAIL | `data` list is empty | Library contains zero entries |
 | `SYNC_CANDIDATES_ZERO` | FAIL | After filtering `NON_SYNC_TYPES`, zero tools remain | No syncable tools after filtering — check type values |
 | `DUPLICATE_GUID` | FAIL | Two entries share the same `guid` | Duplicate guid `{guid}` at indexes {i} and {j} |
-| `DUPLICATE_PRODUCT_ID` | FAIL | Two sync-candidate entries share `product-id` | Duplicate product-id `{id}` at indexes {i} and {j} — upsert will collide |
+| `DUPLICATE_PRODUCT_ID` | PLEX: FAIL / **STAGING: WARN** | Two sync-candidate entries share `product-id` | Duplicate product-id `{id}` at indexes {i} and {j} — upsert will collide |
 | `CROSS_LIBRARY_DUPLICATE` | WARN | `product-id` already seen in a previously validated library (multi-library runs only) | product-id `{id}` also exists in `{other_library}` — check for cross-library collision |
 | `UNKNOWN_TYPE_PRESENT` | WARN | A `type` value is not in `KNOWN_TOOL_TYPES` | Unknown type `"{type}"` at index {i} — will be included in sync unless filter is updated |
 
@@ -257,8 +330,8 @@ Holders and probes are silently skipped.
 |---|---|---|---|
 | `REQUIRED_FIELD` | FAIL | `guid` | missing or empty string |
 | `REQUIRED_FIELD` | FAIL | `type` | missing or empty string |
-| `REQUIRED_FIELD` | FAIL | `description` | missing or empty string |
-| `REQUIRED_FIELD` | FAIL | `product-id` | missing or empty string |
+| `REQUIRED_FIELD` | PLEX: FAIL / **STAGING: WARN** | `description` | missing or empty string |
+| `REQUIRED_FIELD` | PLEX: FAIL / **STAGING: WARN** | `product-id` | missing or empty string |
 
 #### Vendor Rules
 

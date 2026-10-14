@@ -19,9 +19,20 @@ Credentials come from environment variables loaded via ``bootstrap.py``:
   APS_CLIENT_SECRET    App client secret
   APS_CALLBACK_URL     OAuth redirect URI (default: http://localhost:5000/api/aps/callback)
 
-Token state is persisted to a local file (``.aps_tokens.json``, gitignored)
-so tokens survive Flask debug reloads and process restarts. A production
-deploy would use an encrypted store or database instead.
+Token state lives in a pluggable token store, chosen by ``APS_TOKEN_STORE``
+(or injected via ``APSClient(token_store=...)``):
+
+  file (default)  ``FileTokenStore`` — a local JSON file (``.aps_tokens.json``,
+                  gitignored) so tokens survive Flask debug reloads and
+                  process restarts. Local dev.
+  infisical       ``InfisicalTokenStore`` — the refresh token lives in
+                  Infisical (``DATUM_INFISICAL_PROJECT_ID``,
+                  ``DATUM_INFISICAL_ENV`` default ``prod``, key
+                  ``APS_REFRESH_TOKEN``) and is written back on every
+                  rotation. Nightly sync on GitHub Actions. Authenticates
+                  with ``INFISICAL_UNIVERSAL_AUTH_CLIENT_ID/SECRET``.
+
+Seed or re-seed the Infisical token with ``datum-aps-consent``.
 """
 from __future__ import annotations
 
@@ -29,6 +40,9 @@ import io
 import json
 import logging
 import os
+import re
+import subprocess
+import tempfile
 import time
 import zipfile
 from pathlib import Path
@@ -81,30 +95,35 @@ class APSHTTPError(RuntimeError):
 
 
 # ─────────────────────────────────────────────
-# Token store (file-backed, single-user)
+# Token stores
 # ─────────────────────────────────────────────
 # Default token file lives next to .env.local — both are gitignored.
 _DEFAULT_TOKEN_PATH = Path(__file__).resolve().parent / ".aps_tokens.json"
 
+#: Env var that picks the token store when ``APSClient(token_store=None)``.
+TOKEN_STORE_ENV = "APS_TOKEN_STORE"
 
-class TokenStore:
+
+class BaseTokenStore:
     """
-    Persists OAuth tokens to a local JSON file so they survive Flask
-    debug reloads and process restarts.
+    In-memory OAuth token state plus a persistence hook.
 
-    Parameters
-    ----------
-    path : Path | None
-        File to persist tokens to. ``None`` disables persistence
-        (pure in-memory, useful for tests).
+    Public surface (what ``APSClient`` relies on):
+
+    - ``access_token`` / ``refresh_token`` / ``expires_at`` attributes
+    - ``is_valid`` — a non-empty access token that has not expired
+    - ``update(data)`` — take an Autodesk token response, then persist
+    - ``clear()`` — forget the tokens
+
+    Subclasses override ``_persist()`` (called at the end of ``update()``)
+    and ``_discard()`` (called at the end of ``clear()``). Both default to
+    no-ops, so ``BaseTokenStore()`` itself is a pure in-memory store.
     """
 
-    def __init__(self, path: Path | None = _DEFAULT_TOKEN_PATH):
-        self._path = path
+    def __init__(self) -> None:
         self.access_token: str | None = None
         self.refresh_token: str | None = None
         self.expires_at: float = 0.0  # epoch seconds
-        self._load()
 
     @property
     def is_valid(self) -> bool:
@@ -114,12 +133,42 @@ class TokenStore:
         self.access_token = data["access_token"]
         self.refresh_token = data.get("refresh_token")
         self.expires_at = time.time() + data.get("expires_in", 3600) - 60
-        self._save()
+        self._persist()
 
     def clear(self) -> None:
         self.access_token = None
         self.refresh_token = None
         self.expires_at = 0.0
+        self._discard()
+
+    def _persist(self) -> None:
+        """Hook: store the current tokens somewhere durable."""
+
+    def _discard(self) -> None:
+        """Hook: remove durable token state."""
+
+
+class FileTokenStore(BaseTokenStore):
+    """
+    Persists OAuth tokens to a local JSON file so they survive Flask
+    debug reloads and process restarts. The default for local dev.
+
+    Parameters
+    ----------
+    path : Path | None
+        File to persist tokens to. ``None`` disables persistence
+        (pure in-memory, useful for tests and ``datum-aps-consent``).
+    """
+
+    def __init__(self, path: Path | None = _DEFAULT_TOKEN_PATH):
+        super().__init__()
+        self._path = path
+        self._load()
+
+    def _persist(self) -> None:
+        self._save()
+
+    def _discard(self) -> None:
         if self._path and self._path.exists():
             self._path.unlink()
 
@@ -147,6 +196,276 @@ class TokenStore:
             log.warning("Could not load APS tokens from %s: %s", self._path, e)
 
 
+#: Backward-compatible name: ``TokenStore`` *is* the file store.
+TokenStore = FileTokenStore
+
+
+# ─────────────────────────────────────────────
+# Infisical CLI helpers
+# ─────────────────────────────────────────────
+# Same subprocess discipline as grace-cam's scripts/plex_mcp_launch.py:
+#   - stdin=DEVNULL so an expired human session cannot block on (or eat
+#     input for) the CLI's interactive region picker;
+#   - stdout/stderr captured, decoded as UTF-8 with errors="replace" (the
+#     CLI's ANSI colour escapes are not valid cp1252 and would otherwise
+#     raise inside the capture thread on Windows);
+#   - a hard timeout; ANSI stripped from stderr before it is surfaced.
+INFISICAL_TIMEOUT = 60  # seconds
+_ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+_UA_ID = "INFISICAL_UNIVERSAL_AUTH_CLIENT_ID"
+_UA_SECRET = "INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET"
+
+
+class InfisicalCLIError(RuntimeError):
+    """An ``infisical`` CLI call failed (missing CLI, timeout, non-zero exit)."""
+
+
+def _tidy(text: str | None, redact: str | None = None) -> str:
+    """One readable line out of CLI stderr, with an optional value redacted."""
+    out = " ".join(_ANSI.sub("", text or "").split())
+    if redact:
+        out = out.replace(redact, "<redacted>")
+    return out[:240]
+
+
+def _run_infisical(args: list[str]) -> subprocess.CompletedProcess:
+    """Run ``infisical <args>`` with the parent environment."""
+    try:
+        return subprocess.run(
+            ["infisical", *args],
+            env=dict(os.environ),
+            timeout=INFISICAL_TIMEOUT,
+            encoding="utf-8",
+            errors="replace",
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+        )
+    except FileNotFoundError:
+        raise InfisicalCLIError("infisical CLI not on PATH") from None
+    except subprocess.TimeoutExpired:
+        raise InfisicalCLIError(
+            f"infisical {args[0]} timed out after {INFISICAL_TIMEOUT}s"
+        ) from None
+
+
+def has_universal_auth_identity() -> bool:
+    """True when both ``INFISICAL_UNIVERSAL_AUTH_CLIENT_ID/SECRET`` are set."""
+    return bool(os.environ.get(_UA_ID)) and bool(os.environ.get(_UA_SECRET))
+
+
+def infisical_login_universal_auth() -> str:
+    """
+    Mint a short-lived Infisical access token from the machine identity in
+    ``INFISICAL_UNIVERSAL_AUTH_CLIENT_ID/SECRET``. The client secret travels
+    in the child's environment, never in argv.
+    """
+    res = _run_infisical(["login", "--method=universal-auth", "--plain", "--silent"])
+    token = (res.stdout or "").strip()
+    if res.returncode != 0 or not token:
+        raise InfisicalCLIError(
+            f"universal-auth login failed (rc={res.returncode}): {_tidy(res.stderr)}"
+        )
+    return token
+
+
+def infisical_get_secret(
+    project_id: str, env: str, key: str, token: str | None = None
+) -> str | None:
+    """
+    Read one secret value. Returns ``None`` when it is missing or empty.
+    ``token=None`` omits ``--token`` and uses the CLI's own login session.
+    """
+    args = [
+        "secrets", "get", key, "--plain", "--silent", "--expand=false",
+        f"--projectId={project_id}", f"--env={env}",
+    ]
+    if token:
+        args.append(f"--token={token}")
+    res = _run_infisical(args)
+    if res.returncode != 0:
+        raise InfisicalCLIError(
+            f"infisical secrets get {key} failed (rc={res.returncode}): "
+            f"{_tidy(res.stderr)}"
+        )
+    value = (res.stdout or "").strip()
+    if not value or value == "*not found*":
+        return None
+    return value
+
+
+def infisical_set_secret(
+    project_id: str, env: str, key: str, value: str, token: str | None = None
+) -> None:
+    """
+    Write one secret value without ever putting it in a process argv.
+
+    The value goes into a ``tempfile.mkstemp`` file (created 0600, owner-only)
+    and the CLI is called as ``infisical secrets set KEY=@<path>``, the CLI's
+    read-value-from-file form. The file is unlinked in ``finally`` as soon as
+    the CLI returns, success or failure. The argv therefore carries only the
+    key and the temp path. ``token=None`` omits ``--token`` so a human
+    ``infisical login`` session works (``datum-aps-consent``).
+    """
+    if not value:
+        raise InfisicalCLIError(f"refusing to write an empty value to {key}")
+    fd, path = tempfile.mkstemp(prefix="datum-infisical-", suffix=".secret")
+    try:
+        try:
+            os.chmod(path, 0o600)
+            os.write(fd, value.encode("utf-8"))
+        finally:
+            os.close(fd)
+        args = [
+            "secrets", "set", f"{key}=@{path}", "--silent",
+            f"--projectId={project_id}", f"--env={env}",
+        ]
+        if token:
+            args.append(f"--token={token}")
+        res = _run_infisical(args)
+    finally:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+    if res.returncode != 0:
+        raise InfisicalCLIError(
+            f"infisical secrets set {key} failed (rc={res.returncode}): "
+            f"{_tidy(res.stderr, redact=value)}"
+        )
+
+
+class InfisicalTokenStore(BaseTokenStore):
+    """
+    Production token store: the APS refresh token lives in Infisical.
+
+    APS refresh tokens are single-use and rotate on every refresh, so the
+    only safe home for the production token is one that the runner rewrites
+    every time it refreshes.
+
+    - On construction, reads ``key`` from Infisical. No access token is
+      persisted, so ``is_valid`` starts False and the first
+      ``APSClient._ensure_token()`` refreshes.
+    - ``update(data)`` sets the in-memory fields, then writes the new
+      refresh token back to Infisical **before returning** (see
+      ``infisical_set_secret`` for how the value stays out of argv). Any
+      failure raises ``APSAuthError("refresh token write-back failed: …")``
+      and invalidates the in-memory access token, so no API call can run on
+      a token chain Infisical does not know about.
+    - ``clear()`` is a no-op with a warning: code never deletes the
+      production token.
+
+    Auth is the machine identity in ``INFISICAL_UNIVERSAL_AUTH_CLIENT_ID``
+    / ``INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET``. A fresh Infisical access
+    token is minted for each operation (one for the read, one for the
+    write-back) rather than cached, so a long run can never hit an expired
+    Infisical token on the critical write.
+
+    Parameters
+    ----------
+    project_id : str | None
+        Infisical project id. Defaults to ``DATUM_INFISICAL_PROJECT_ID``.
+    env : str | None
+        Infisical environment slug. Defaults to ``DATUM_INFISICAL_ENV``,
+        then ``"prod"``.
+    key : str
+        Secret name holding the refresh token.
+    """
+
+    def __init__(
+        self,
+        project_id: str | None = None,
+        env: str | None = None,
+        key: str = "APS_REFRESH_TOKEN",
+    ):
+        super().__init__()
+        self.project_id = (
+            project_id or os.environ.get("DATUM_INFISICAL_PROJECT_ID", "")
+        ).strip()
+        self.env = (env or os.environ.get("DATUM_INFISICAL_ENV", "") or "prod").strip()
+        self.key = key
+        if not self.project_id:
+            raise APSConfigError(
+                "InfisicalTokenStore needs an Infisical project id: set "
+                "DATUM_INFISICAL_PROJECT_ID (APS_TOKEN_STORE=infisical)."
+            )
+        self._load()
+
+    def _token(self) -> str:
+        missing = [n for n in (_UA_ID, _UA_SECRET) if not os.environ.get(n)]
+        if missing:
+            raise APSAuthError(
+                "InfisicalTokenStore needs a machine identity: "
+                f"{' and '.join(missing)} not set."
+            )
+        return infisical_login_universal_auth()
+
+    def _where(self) -> str:
+        return f"Infisical {self.env}/{self.key}"
+
+    def _load(self) -> None:
+        try:
+            value = infisical_get_secret(
+                self.project_id, self.env, self.key, token=self._token()
+            )
+        except InfisicalCLIError as e:
+            raise APSAuthError(f"could not read {self._where()}: {e}") from None
+        if not value:
+            raise APSAuthError(
+                f"{self._where()} is empty or missing — seed it with "
+                "datum-aps-consent."
+            )
+        self.refresh_token = value
+        log.info("APS refresh token loaded from %s (len %d)", self._where(), len(value))
+
+    def _persist(self) -> None:
+        try:
+            if not self.refresh_token:
+                raise InfisicalCLIError(
+                    "Autodesk token response carried no refresh_token"
+                )
+            infisical_set_secret(
+                self.project_id, self.env, self.key, self.refresh_token,
+                token=self._token(),
+            )
+        except (InfisicalCLIError, APSAuthError) as e:
+            # Keep refresh_token in memory (it may be the only live copy) but
+            # make the access token unusable until a write-back succeeds.
+            self.access_token = None
+            self.expires_at = 0.0
+            raise APSAuthError(f"refresh token write-back failed: {e}") from None
+        log.info(
+            "APS refresh token written back to %s (len %d)",
+            self._where(), len(self.refresh_token),
+        )
+
+    def clear(self) -> None:
+        log.warning(
+            "InfisicalTokenStore.clear() is a no-op: the production APS "
+            "refresh token in %s is never deleted from code.", self._where(),
+        )
+
+
+def select_token_store(
+    token_path: Path | None | str = _DEFAULT_TOKEN_PATH,
+) -> BaseTokenStore:
+    """
+    Build the token store named by ``APS_TOKEN_STORE``:
+
+    - unset / ``file`` → ``FileTokenStore(path=token_path)``
+    - ``infisical`` → ``InfisicalTokenStore()``
+    - anything else → ``APSConfigError``
+    """
+    raw = os.environ.get(TOKEN_STORE_ENV, "")
+    kind = raw.strip().lower() or "file"
+    if kind == "file":
+        return FileTokenStore(path=Path(token_path) if token_path else None)
+    if kind == "infisical":
+        return InfisicalTokenStore()
+    raise APSConfigError(
+        f"{TOKEN_STORE_ENV}={raw!r} is not valid; use 'file' (default) or 'infisical'."
+    )
+
+
 # ─────────────────────────────────────────────
 # Client
 # ─────────────────────────────────────────────
@@ -167,6 +486,12 @@ class APSClient:
     token_path : Path | None | str
         File to persist tokens to. Pass ``None`` to disable persistence
         (in-memory only, useful for tests). Defaults to ``.aps_tokens.json``.
+        Only used when the file store is selected.
+    token_store : BaseTokenStore | None
+        Token store instance to use. When ``None`` (the default) the store
+        is picked by ``APS_TOKEN_STORE``: ``file`` (default) or
+        ``infisical``; any other value raises ``APSConfigError``. See
+        ``select_token_store``.
     """
 
     def __init__(
@@ -176,12 +501,16 @@ class APSClient:
         callback_url: str | None = None,
         timeout: int = DEFAULT_TIMEOUT,
         token_path: Path | None | str = _DEFAULT_TOKEN_PATH,
+        token_store: BaseTokenStore | None = None,
     ):
         self.client_id = client_id or APS_CLIENT_ID
         self.client_secret = client_secret or APS_CLIENT_SECRET
         self.callback_url = callback_url or APS_CALLBACK_URL
         self.timeout = timeout
-        self.tokens = TokenStore(path=Path(token_path) if token_path else None)
+        self.tokens: BaseTokenStore = (
+            token_store if token_store is not None
+            else select_token_store(token_path)
+        )
         self._session = requests.Session()
 
     # ─────────────────────────────────────────
@@ -267,9 +596,17 @@ class APSClient:
         )
         if not resp.ok:
             raise APSAuthError(
-                f"Token refresh failed: {resp.status_code} {resp.text}"
+                "refresh token rejected — re-seed with datum-aps-consent "
+                f"(HTTP {resp.status_code}: {resp.text[:300]})"
             )
         data = resp.json()
+        # Persist BEFORE anything uses the new access token. APS refresh
+        # tokens are single-use: Autodesk has already consumed the old one.
+        # With InfisicalTokenStore, update() writes the new refresh token
+        # back to Infisical and raises if that fails, so no API call runs on
+        # a token chain Infisical does not hold. If the process dies after a
+        # successful write-back, Infisical still holds the newest valid
+        # token and the next run picks up from there.
         self.tokens.update(data)
         log.info("APS tokens refreshed")
         return data

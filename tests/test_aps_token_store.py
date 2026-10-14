@@ -7,16 +7,21 @@ Tests for the pluggable APS token stores in aps_client.py.
   - InfisicalTokenStore: reads APS_REFRESH_TOKEN from Infisical via the
     CLI, writes the rotated refresh token back on every ``update()``,
     never puts the token in a process argv, ``clear()`` is a no-op.
+  - SupabaseTokenStore (production backend): reads the refresh token from
+    ``public.runtime_state``, upserts the rotated one (with
+    ``previous_value``) before ``update()`` returns, ``clear()`` is a no-op.
   - Store selection via ``APS_TOKEN_STORE`` and ``APSClient(token_store=)``.
 
-``subprocess.run`` and ``requests.Session`` are patched throughout; no real
-Infisical CLI or Autodesk call is ever made.
+``subprocess.run``, ``SupabaseClient`` and ``requests.Session`` are patched
+throughout; no real Infisical CLI, Supabase or Autodesk call is ever made.
 """
 from __future__ import annotations
 
+import json
 import logging
 import subprocess
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -529,6 +534,353 @@ class TestRefreshWithInfisical:
         store = InfisicalTokenStore()
         client = APSClient(client_id="id", client_secret="s", token_store=store)
         fake_cli.set_rc = 1
+        refresh_resp = MagicMock(ok=True)
+        refresh_resp.json.return_value = {
+            "access_token": "fresh-at", "refresh_token": NEW_RT, "expires_in": 3600}
+        get = MagicMock()
+        with patch.object(client._session, "post", return_value=refresh_resp), \
+             patch.object(client._session, "get", get):
+            with pytest.raises(APSAuthError, match="write-back failed"):
+                client.get_hubs()
+        get.assert_not_called()
+
+
+# ═════════════════════════════════════════════
+# SupabaseTokenStore (production backend, spec amendment B2)
+# ═════════════════════════════════════════════
+# ``SupabaseClient`` is always a fake (``FakeSupabase``) or a real client
+# whose ``requests.Session`` verbs are patched. No network.
+from supabase_client import SupabaseClient, SupabaseHTTPError  # noqa: E402
+
+from aps_client import (  # noqa: E402
+    RuntimeStateError,
+    SupabaseTokenStore,
+    supabase_get_runtime_state,
+    supabase_set_runtime_state,
+)
+
+SB_KEY = "aps_refresh_token"
+
+
+class FakeSupabase:
+    """Records select/upsert calls against an in-memory ``runtime_state``."""
+
+    def __init__(self, rows: dict[str, dict] | None = None):
+        self.rows: dict[str, dict] = rows if rows is not None else {
+            SB_KEY: {"key": SB_KEY, "value": OLD_RT, "previous_value": None},
+        }
+        self.calls: list[tuple] = []
+        self.select_exc: Exception | None = None
+        self.upsert_exc: Exception | None = None
+
+    def select(self, table, *, columns="*", filters=None, limit=None):
+        self.calls.append(("select", table, columns, dict(filters or {}), limit))
+        if self.select_exc is not None:
+            raise self.select_exc
+        key = (filters or {}).get("key", "")
+        assert key.startswith("eq."), key
+        row = self.rows.get(key[3:])
+        return [dict(row)] if row else []
+
+    def upsert(self, table, rows, *, on_conflict, returning="representation"):
+        row = dict(rows)
+        self.calls.append(("upsert", table, row, on_conflict, returning))
+        if self.upsert_exc is not None:
+            raise self.upsert_exc
+        self.rows[row["key"]] = row
+        return []
+
+    def verbs(self) -> list[str]:
+        return [c[0] for c in self.calls]
+
+
+@pytest.fixture
+def sb():
+    return FakeSupabase()
+
+
+def _sb_update(store, rt=NEW_RT):
+    store.update({"access_token": "new-access", "refresh_token": rt,
+                  "expires_in": 3600})
+
+
+class TestSupabaseLoad:
+    def test_loads_refresh_token_and_starts_invalid(self, sb):
+        store = SupabaseTokenStore(client=sb)
+        assert isinstance(store, BaseTokenStore)
+        assert store.key == SB_KEY
+        assert store.refresh_token == OLD_RT
+        assert store.access_token is None
+        assert not store.is_valid  # first _ensure_token() must refresh
+
+    def test_select_call_shape(self, sb):
+        SupabaseTokenStore(client=sb)
+        assert sb.calls == [
+            ("select", "runtime_state", "value", {"key": f"eq.{SB_KEY}"}, 1)]
+
+    def test_custom_key(self):
+        fake = FakeSupabase({"other": {"key": "other", "value": "rt-x"}})
+        store = SupabaseTokenStore(key="other", client=fake)
+        assert store.refresh_token == "rt-x"
+
+    @pytest.mark.parametrize("rows", [{}, {SB_KEY: {"key": SB_KEY, "value": ""}},
+                                      {SB_KEY: {"key": SB_KEY, "value": None}},
+                                      {SB_KEY: {"key": SB_KEY, "value": "   "}}])
+    def test_missing_or_empty_row_names_table_key_and_remedy(self, rows):
+        with pytest.raises(APSAuthError) as exc:
+            SupabaseTokenStore(client=FakeSupabase(rows))
+        msg = str(exc.value)
+        assert "public.runtime_state" in msg
+        assert SB_KEY in msg
+        assert "datum-aps-consent" in msg
+
+    def test_read_http_error_is_auth_error(self, sb):
+        sb.select_exc = SupabaseHTTPError(
+            404, {"message": 'relation "public.runtime_state" does not exist'},
+            "https://x.supabase.co/rest/v1/runtime_state")
+        with pytest.raises(APSAuthError, match="could not read") as exc:
+            SupabaseTokenStore(client=sb)
+        assert "does not exist" in str(exc.value)
+
+    def test_read_connection_error_is_auth_error(self, sb):
+        import requests
+        sb.select_exc = requests.ConnectionError("name resolution failed")
+        with pytest.raises(APSAuthError, match="could not read"):
+            SupabaseTokenStore(client=sb)
+
+    def test_load_log_has_length_not_token(self, sb, caplog):
+        with caplog.at_level(logging.DEBUG, logger="aps_client"):
+            SupabaseTokenStore(client=sb)
+        text = "\n".join(r.getMessage() for r in caplog.records)
+        assert OLD_RT not in text
+        assert f"len {len(OLD_RT)}" in text
+        assert SB_KEY in text
+
+    def test_builds_supabase_client_when_none(self, monkeypatch):
+        fake = FakeSupabase()
+        built = []
+
+        def factory():
+            built.append(True)
+            return fake
+
+        monkeypatch.setattr(aps_client, "SupabaseClient", factory)
+        store = SupabaseTokenStore()
+        assert built == [True]
+        assert store.refresh_token == OLD_RT
+
+    def test_missing_supabase_env_is_config_error(self, monkeypatch):
+        monkeypatch.delenv("SUPABASE_URL", raising=False)
+        with pytest.raises(APSConfigError, match="SUPABASE_URL"):
+            SupabaseTokenStore()
+
+
+class TestSupabaseWriteBack:
+    def test_update_upserts_new_token_with_previous(self, sb):
+        store = SupabaseTokenStore(client=sb)
+        _sb_update(store)
+        assert store.refresh_token == NEW_RT
+        assert store.access_token == "new-access"
+        assert store.is_valid
+        assert sb.verbs() == ["select", "upsert"]
+        _, table, row, on_conflict, returning = sb.calls[-1]
+        assert table == "runtime_state"
+        assert on_conflict == "key"
+        # The token must not be echoed back in the response body.
+        assert returning == "minimal"
+        assert row["key"] == SB_KEY
+        assert row["value"] == NEW_RT
+        assert row["previous_value"] == OLD_RT
+        assert row["updated_by"] == "datum-sync"
+        ts = datetime.fromisoformat(row["updated_at"])
+        assert ts.utcoffset() == timedelta(0)
+        assert abs((datetime.now(timezone.utc) - ts).total_seconds()) < 60
+
+    def test_second_rotation_carries_the_first(self, sb):
+        store = SupabaseTokenStore(client=sb)
+        _sb_update(store, "rt-2")
+        _sb_update(store, "rt-3")
+        assert sb.rows[SB_KEY]["value"] == "rt-3"
+        assert sb.rows[SB_KEY]["previous_value"] == "rt-2"
+
+    def test_write_back_happens_before_update_returns(self, sb):
+        store = SupabaseTokenStore(client=sb)
+        _sb_update(store)
+        # update() has returned: the row already holds the new token.
+        assert sb.rows[SB_KEY]["value"] == NEW_RT
+
+    def test_write_back_failure_raises_and_invalidates(self, sb):
+        store = SupabaseTokenStore(client=sb)
+        # PostgREST error bodies can echo the failing row; it must be redacted.
+        sb.upsert_exc = SupabaseHTTPError(
+            500, {"message": f"Failing row contains ({SB_KEY}, {NEW_RT}, {OLD_RT})"},
+            "https://x.supabase.co/rest/v1/runtime_state?on_conflict=key")
+        with pytest.raises(APSAuthError, match="refresh token write-back failed") as exc:
+            _sb_update(store)
+        msg = str(exc.value)
+        assert "500" in msg
+        assert NEW_RT not in msg
+        assert OLD_RT not in msg
+        assert not store.is_valid
+        assert store.access_token is None
+        # The new refresh token stays in memory: it is the only live copy.
+        assert store.refresh_token == NEW_RT
+        assert sb.rows[SB_KEY]["value"] == OLD_RT
+
+    def test_failed_write_back_is_retried_with_same_previous(self, sb):
+        store = SupabaseTokenStore(client=sb)
+        sb.upsert_exc = SupabaseHTTPError(503, "unavailable", "u")
+        with pytest.raises(APSAuthError):
+            _sb_update(store, "rt-2")
+        sb.upsert_exc = None
+        _sb_update(store, "rt-3")
+        # The row never held rt-2, so previous_value is still what it held.
+        assert sb.rows[SB_KEY]["value"] == "rt-3"
+        assert sb.rows[SB_KEY]["previous_value"] == OLD_RT
+
+    def test_write_back_connection_error_raises(self, sb):
+        import requests
+        store = SupabaseTokenStore(client=sb)
+        sb.upsert_exc = requests.Timeout("read timed out")
+        with pytest.raises(APSAuthError, match="refresh token write-back failed"):
+            _sb_update(store)
+        assert not store.is_valid
+
+    def test_missing_refresh_token_in_response_raises(self, sb):
+        store = SupabaseTokenStore(client=sb)
+        with pytest.raises(APSAuthError, match="refresh token write-back failed"):
+            store.update({"access_token": "a", "expires_in": 3600})
+        assert not store.is_valid
+        assert "upsert" not in sb.verbs()
+
+    def test_token_never_logged(self, sb, caplog):
+        with caplog.at_level(logging.DEBUG, logger="aps_client"):
+            store = SupabaseTokenStore(client=sb)
+            _sb_update(store)
+            sb.upsert_exc = SupabaseHTTPError(500, f"echo {NEW_RT}", "u")
+            with pytest.raises(APSAuthError):
+                _sb_update(store)
+            store.clear()
+        text = "\n".join(r.getMessage() for r in caplog.records)
+        assert NEW_RT not in text
+        assert OLD_RT not in text
+        assert f"len {len(NEW_RT)}" in text
+
+    def test_clear_is_noop_with_warning(self, sb, caplog):
+        store = SupabaseTokenStore(client=sb)
+        _sb_update(store)
+        n = len(sb.calls)
+        with caplog.at_level(logging.WARNING, logger="aps_client"):
+            store.clear()
+        assert len(sb.calls) == n
+        assert sb.rows[SB_KEY]["value"] == NEW_RT
+        assert store.refresh_token == NEW_RT
+        assert any("no-op" in r.getMessage() for r in caplog.records)
+
+
+class TestRuntimeStateHelpers:
+    def test_set_refuses_empty_value(self, sb):
+        with pytest.raises(RuntimeStateError):
+            supabase_set_runtime_state(sb, SB_KEY, "")
+        assert sb.calls == []
+
+    def test_set_defaults(self, sb):
+        supabase_set_runtime_state(sb, SB_KEY, NEW_RT, previous_value=OLD_RT)
+        row = sb.calls[-1][2]
+        assert row["updated_by"] == "datum-aps-consent"
+        assert row["previous_value"] == OLD_RT
+
+    def test_get_returns_none_when_missing(self):
+        assert supabase_get_runtime_state(FakeSupabase({}), SB_KEY) is None
+
+    def test_get_error_is_runtime_state_error(self, sb):
+        sb.select_exc = SupabaseHTTPError(401, "bad jwt", "u")
+        with pytest.raises(RuntimeStateError, match="401"):
+            supabase_get_runtime_state(sb, SB_KEY)
+
+    def test_wire_shape_with_real_client(self, monkeypatch):
+        """Real SupabaseClient with requests.Session patched: PostgREST shape."""
+        monkeypatch.setenv("SUPABASE_URL", "https://unit.supabase.co")
+        monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "svc-key")
+        client = SupabaseClient()
+        get_resp = MagicMock(ok=True, content=b"x")
+        get_resp.json.return_value = [{"value": OLD_RT}]
+        post_resp = MagicMock(ok=True, content=b"")
+        with patch.object(client._session, "get", return_value=get_resp) as get, \
+             patch.object(client._session, "post", return_value=post_resp) as post:
+            store = SupabaseTokenStore(client=client)
+            _sb_update(store)
+        get_url = get.call_args.args[0]
+        assert get_url == "https://unit.supabase.co/rest/v1/runtime_state"
+        assert get.call_args.kwargs["params"]["key"] == f"eq.{SB_KEY}"
+        post_kw = post.call_args.kwargs
+        assert post.call_args.args[0] == get_url
+        assert post_kw["params"] == {"on_conflict": "key"}
+        assert "return=minimal" in post_kw["headers"]["Prefer"]
+        assert "merge-duplicates" in post_kw["headers"]["Prefer"]
+        body = json.loads(post_kw["data"])
+        assert body[0]["value"] == NEW_RT
+        assert body[0]["previous_value"] == OLD_RT
+
+
+class TestSupabaseSelection:
+    @pytest.mark.parametrize("value", ["supabase", "SUPABASE", " supabase "])
+    def test_supabase_value(self, monkeypatch, value):
+        fake = FakeSupabase()
+        monkeypatch.setattr(aps_client, "SupabaseClient", lambda: fake)
+        monkeypatch.setenv("APS_TOKEN_STORE", value)
+        client = APSClient(client_id="id", client_secret="s")
+        assert isinstance(client.tokens, SupabaseTokenStore)
+        assert client.tokens.refresh_token == OLD_RT
+
+    def test_invalid_value_lists_all_choices(self, monkeypatch):
+        monkeypatch.setenv("APS_TOKEN_STORE", "vault")
+        with pytest.raises(APSConfigError) as exc:
+            select_token_store(None)
+        for word in ("file", "supabase", "infisical"):
+            assert word in str(exc.value)
+
+
+class TestRefreshWithSupabase:
+    def test_write_back_precedes_first_api_call(self, sb):
+        store = SupabaseTokenStore(client=sb)
+        client = APSClient(client_id="id", client_secret="s", token_store=store)
+        order: list[str] = []
+        real_upsert = sb.upsert
+
+        def upsert_spy(*a, **kw):
+            order.append("supabase upsert")
+            return real_upsert(*a, **kw)
+
+        sb.upsert = upsert_spy
+        refresh_resp = MagicMock(ok=True)
+        refresh_resp.json.return_value = {
+            "access_token": "fresh-at", "refresh_token": NEW_RT, "expires_in": 3600}
+
+        def post_spy(url, data=None, **kw):
+            order.append("autodesk refresh")
+            assert data["refresh_token"] == OLD_RT
+            return refresh_resp
+
+        hubs_resp = MagicMock(ok=True)
+        hubs_resp.json.return_value = {"data": []}
+
+        def get_spy(url, headers=None, **kw):
+            order.append("autodesk api")
+            assert headers["Authorization"] == "Bearer fresh-at"
+            return hubs_resp
+
+        with patch.object(client._session, "post", side_effect=post_spy), \
+             patch.object(client._session, "get", side_effect=get_spy):
+            client.get_hubs()
+        assert order == ["autodesk refresh", "supabase upsert", "autodesk api"]
+        assert sb.rows[SB_KEY]["value"] == NEW_RT
+        assert sb.rows[SB_KEY]["previous_value"] == OLD_RT
+
+    def test_failed_write_back_blocks_api_call(self, sb):
+        store = SupabaseTokenStore(client=sb)
+        client = APSClient(client_id="id", client_secret="s", token_store=store)
+        sb.upsert_exc = SupabaseHTTPError(503, "unavailable", "u")
         refresh_resp = MagicMock(ok=True)
         refresh_resp.json.return_value = {
             "access_token": "fresh-at", "refresh_token": NEW_RT, "expires_in": 3600}

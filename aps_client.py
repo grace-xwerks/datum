@@ -25,14 +25,24 @@ Token state lives in a pluggable token store, chosen by ``APS_TOKEN_STORE``
   file (default)  ``FileTokenStore`` — a local JSON file (``.aps_tokens.json``,
                   gitignored) so tokens survive Flask debug reloads and
                   process restarts. Local dev.
+  supabase        ``SupabaseTokenStore`` — the refresh token lives in the
+                  ``public.runtime_state`` row ``aps_refresh_token`` of the
+                  datum Supabase project (RLS on, no policies: service role
+                  only) and is written back on every rotation, previous value
+                  kept in ``previous_value``. Production: the nightly sync on
+                  GitHub Actions. Needs only ``SUPABASE_URL`` +
+                  ``SUPABASE_SERVICE_ROLE_KEY``.
   infisical       ``InfisicalTokenStore`` — the refresh token lives in
                   Infisical (``DATUM_INFISICAL_PROJECT_ID``,
                   ``DATUM_INFISICAL_ENV`` default ``prod``, key
                   ``APS_REFRESH_TOKEN``) and is written back on every
-                  rotation. Nightly sync on GitHub Actions. Authenticates
-                  with ``INFISICAL_UNIVERSAL_AUTH_CLIENT_ID/SECRET``.
+                  rotation. Authenticates with
+                  ``INFISICAL_UNIVERSAL_AUTH_CLIENT_ID/SECRET``. Kept for
+                  completeness; unused by default (an Infisical identity on
+                  the runner costs a seat).
 
-Seed or re-seed the Infisical token with ``datum-aps-consent``.
+Seed or re-seed the production token with ``datum-aps-consent`` (``--store
+supabase`` by default, ``--store infisical`` for the Infisical store).
 """
 from __future__ import annotations
 
@@ -45,6 +55,7 @@ import subprocess
 import tempfile
 import time
 import zipfile
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode
@@ -52,6 +63,7 @@ from urllib.parse import urlencode
 import requests
 
 import bootstrap  # noqa: F401 — loads .env.local into os.environ on import
+from supabase_client import SupabaseClient, SupabaseConfigError
 
 log = logging.getLogger(__name__)
 
@@ -220,11 +232,13 @@ class InfisicalCLIError(RuntimeError):
     """An ``infisical`` CLI call failed (missing CLI, timeout, non-zero exit)."""
 
 
-def _tidy(text: str | None, redact: str | None = None) -> str:
-    """One readable line out of CLI stderr, with an optional value redacted."""
+def _tidy(text: str | None, *redact: str | None) -> str:
+    """One readable line out of CLI stderr / an error, with values redacted
+    (before truncation, so no partial value survives)."""
     out = " ".join(_ANSI.sub("", text or "").split())
-    if redact:
-        out = out.replace(redact, "<redacted>")
+    for value in redact:
+        if value:
+            out = out.replace(value, "<redacted>")
     return out[:240]
 
 
@@ -330,7 +344,7 @@ def infisical_set_secret(
     if res.returncode != 0:
         raise InfisicalCLIError(
             f"infisical secrets set {key} failed (rc={res.returncode}): "
-            f"{_tidy(res.stderr, redact=value)}"
+            f"{_tidy(res.stderr, value)}"
         )
 
 
@@ -445,6 +459,199 @@ class InfisicalTokenStore(BaseTokenStore):
         )
 
 
+# ─────────────────────────────────────────────
+# Supabase runtime_state helpers
+# ─────────────────────────────────────────────
+#: Table holding runner state (db/migrations/0008_runtime_state.sql). RLS is
+#: on with no policies, so only the service-role key can read or write it.
+RUNTIME_STATE_TABLE = "runtime_state"
+#: Row key of the production APS refresh token in ``public.runtime_state``.
+SUPABASE_TOKEN_KEY = "aps_refresh_token"
+
+
+class RuntimeStateError(RuntimeError):
+    """A ``public.runtime_state`` read or write failed. The message is a
+    one-line diagnostic with any stored values redacted."""
+
+
+def _runtime_state_where(key: str) -> str:
+    return f"public.{RUNTIME_STATE_TABLE}[{key}]"
+
+
+def _diagnostic(exc: Exception, *secrets: str | None) -> str:
+    """``Type: message`` on one line, with every given secret redacted.
+
+    PostgREST error bodies can echo the failing row (``Failing row contains
+    (…)``), so a write error may carry the very token being written.
+    """
+    return _tidy(f"{type(exc).__name__}: {exc}", *secrets)
+
+
+def supabase_get_runtime_state(client: Any, key: str) -> str | None:
+    """
+    Read ``public.runtime_state.value`` for ``key``. Returns ``None`` when
+    the row is missing or its value is empty. Any client or HTTP error
+    raises ``RuntimeStateError``.
+    """
+    try:
+        rows = client.select(
+            RUNTIME_STATE_TABLE, columns="value",
+            filters={"key": f"eq.{key}"}, limit=1,
+        )
+    except Exception as e:  # SupabaseHTTPError, requests errors, bad JSON …
+        raise RuntimeStateError(_diagnostic(e)) from None
+    if not rows:
+        return None
+    value = rows[0].get("value") if isinstance(rows[0], dict) else None
+    value = str(value).strip() if value else ""
+    return value or None
+
+
+def supabase_set_runtime_state(
+    client: Any,
+    key: str,
+    value: str,
+    *,
+    previous_value: str | None = None,
+    updated_by: str = "datum-aps-consent",
+) -> None:
+    """
+    Upsert one ``public.runtime_state`` row:
+    ``{key, value, previous_value, updated_by, updated_at=now (UTC ISO)}``.
+
+    The shared write path for ``SupabaseTokenStore`` (``updated_by=
+    "datum-sync"``) and ``datum-aps-consent``. ``previous_value`` is what
+    the row held before this write, kept for manual recovery. The upsert asks
+    for ``return=minimal`` so the token is not echoed back in the response.
+    Any failure raises ``RuntimeStateError`` with both values redacted.
+    """
+    if not value:
+        raise RuntimeStateError(
+            f"refusing to write an empty value to {_runtime_state_where(key)}"
+        )
+    row = {
+        "key": key,
+        "value": value,
+        "previous_value": previous_value or None,
+        "updated_by": updated_by,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    try:
+        client.upsert(RUNTIME_STATE_TABLE, row, on_conflict="key", returning="minimal")
+    except Exception as e:  # SupabaseHTTPError, requests errors …
+        raise RuntimeStateError(_diagnostic(e, value, previous_value)) from None
+
+
+class SupabaseTokenStore(BaseTokenStore):
+    """
+    Production token store: the APS refresh token lives in the
+    ``public.runtime_state`` row ``key`` of the datum Supabase project.
+
+    APS refresh tokens are single-use and rotate on every refresh, so the
+    only safe home for the production token is one the runner rewrites every
+    time it refreshes. The runner already holds the service-role key, so the
+    row costs no extra credential.
+
+    - On construction, reads the row. Missing or empty → ``APSAuthError``
+      naming the table, the key and the ``datum-aps-consent`` remedy. Any
+      client/HTTP error → ``APSAuthError("could not read …")``. No access
+      token is persisted, so ``is_valid`` starts False and the first
+      ``APSClient._ensure_token()`` refreshes.
+    - ``update(data)`` sets the in-memory fields, then upserts the new
+      refresh token (``previous_value`` = what the row held, ``updated_by``
+      ``"datum-sync"``) **before returning**. Any failure raises
+      ``APSAuthError("refresh token write-back failed: …")`` and invalidates
+      the in-memory access token, so no API call can run on a token chain
+      the row does not know about.
+    - ``clear()`` is a no-op with a warning: code never deletes the
+      production token.
+
+    The token is never logged; only the key and the token's length are.
+
+    Parameters
+    ----------
+    key : str
+        ``runtime_state.key`` of the row holding the refresh token.
+    client : SupabaseClient | None
+        Client to use. ``None`` builds one from ``SUPABASE_URL`` +
+        ``SUPABASE_SERVICE_ROLE_KEY``; if either is missing,
+        ``APSConfigError``.
+    """
+
+    def __init__(self, key: str = SUPABASE_TOKEN_KEY, client: Any | None = None):
+        super().__init__()
+        self.key = key
+        if client is None:
+            try:
+                client = SupabaseClient()
+            except SupabaseConfigError as e:
+                raise APSConfigError(
+                    f"SupabaseTokenStore (APS_TOKEN_STORE=supabase): {e}"
+                ) from None
+        self._client = client
+        # What the row currently holds, as far as this process knows. Becomes
+        # previous_value on the next write-back; advanced only on success.
+        self._stored: str | None = None
+        self._load()
+
+    def _where(self) -> str:
+        return _runtime_state_where(self.key)
+
+    def _load(self) -> None:
+        try:
+            value = supabase_get_runtime_state(self._client, self.key)
+        except RuntimeStateError as e:
+            raise APSAuthError(f"could not read {self._where()}: {e}") from None
+        if not value:
+            raise APSAuthError(
+                f"public.{RUNTIME_STATE_TABLE} row {self.key!r} is missing or "
+                "empty — seed it with datum-aps-consent."
+            )
+        self.refresh_token = value
+        self._stored = value
+        log.info("APS refresh token loaded from %s (len %d)", self._where(), len(value))
+
+    def _persist(self) -> None:
+        # Write-before-use: BaseTokenStore.update() calls this before it
+        # returns, and APSClient.refresh_access_token() calls update() before
+        # any API call uses the new access token. Autodesk has already
+        # consumed the old refresh token, so the new one exists only in
+        # memory until this upsert lands. Writing it first means a crash at
+        # any later point (mid-traversal, OOM, cancelled job) still leaves the
+        # row holding the newest valid token; and if the write fails we stop
+        # here, before the new token chain is used, with a log line that says
+        # exactly that.
+        try:
+            if not self.refresh_token:
+                raise RuntimeStateError(
+                    "Autodesk token response carried no refresh_token"
+                )
+            supabase_set_runtime_state(
+                self._client, self.key, self.refresh_token,
+                previous_value=self._stored, updated_by="datum-sync",
+            )
+        except RuntimeStateError as e:
+            # Keep refresh_token in memory (it may be the only live copy) but
+            # make the access token unusable until a write-back succeeds.
+            self.access_token = None
+            self.expires_at = 0.0
+            raise APSAuthError(f"refresh token write-back failed: {e}") from None
+        self._stored = self.refresh_token
+        log.info(
+            "APS refresh token written back to %s (len %d)",
+            self._where(), len(self.refresh_token),
+        )
+
+    def clear(self) -> None:
+        log.warning(
+            "SupabaseTokenStore.clear() is a no-op: the production APS "
+            "refresh token in %s is never deleted from code.", self._where(),
+        )
+
+
+_TOKEN_STORE_CHOICES = "'file' (default), 'supabase' or 'infisical'"
+
+
 def select_token_store(
     token_path: Path | None | str = _DEFAULT_TOKEN_PATH,
 ) -> BaseTokenStore:
@@ -452,6 +659,7 @@ def select_token_store(
     Build the token store named by ``APS_TOKEN_STORE``:
 
     - unset / ``file`` → ``FileTokenStore(path=token_path)``
+    - ``supabase`` → ``SupabaseTokenStore()`` (production)
     - ``infisical`` → ``InfisicalTokenStore()``
     - anything else → ``APSConfigError``
     """
@@ -459,10 +667,12 @@ def select_token_store(
     kind = raw.strip().lower() or "file"
     if kind == "file":
         return FileTokenStore(path=Path(token_path) if token_path else None)
+    if kind == "supabase":
+        return SupabaseTokenStore()
     if kind == "infisical":
         return InfisicalTokenStore()
     raise APSConfigError(
-        f"{TOKEN_STORE_ENV}={raw!r} is not valid; use 'file' (default) or 'infisical'."
+        f"{TOKEN_STORE_ENV}={raw!r} is not valid; use {_TOKEN_STORE_CHOICES}."
     )
 
 
@@ -489,9 +699,9 @@ class APSClient:
         Only used when the file store is selected.
     token_store : BaseTokenStore | None
         Token store instance to use. When ``None`` (the default) the store
-        is picked by ``APS_TOKEN_STORE``: ``file`` (default) or
-        ``infisical``; any other value raises ``APSConfigError``. See
-        ``select_token_store``.
+        is picked by ``APS_TOKEN_STORE``: ``file`` (default), ``supabase``
+        (production) or ``infisical``; any other value raises
+        ``APSConfigError``. See ``select_token_store``.
     """
 
     def __init__(

@@ -1,0 +1,253 @@
+# Nightly Fusion 360 -> Supabase sync (and the tool-quantity sync that follows).
+#
+# WHY IT EXISTS
+#   `datum-sync` mirrors the Fusion 360 tool libraries (read from Autodesk APS)
+#   into the Supabase `libraries` / `tools` / `cutting_presets` tables;
+#   `datum-sync-inventory` then reconciles tool quantities. Both used to run
+#   from two Windows Task Scheduler jobs on GRACE144, which have been silently
+#   dead since 2026-04-10: nobody noticed for six months because a failure only
+#   ever landed in a local log file. This workflow is the scheduler now. A
+#   failed run is red in the Actions tab and emails whoever last edited the
+#   cron line below.
+#
+#   The cron is 17 5 * * * (05:17 UTC = 00:17 America/Chicago in CDT, 23:17 the
+#   previous evening in CST). It sits off the top of the hour on purpose:
+#   GitHub documents that scheduled runs at :00 can be delayed or dropped under
+#   load (plex_mcp's first :00 schedule was skipped outright). GitHub may still
+#   start a run a few minutes late when the queue is busy.
+#
+# SECRETS (repository secrets; Infisical is the source of truth)
+#   Every secret below is synced into GitHub from Infisical project "Grace
+#   Engineering" (8e04285d-bdf4-4836-b1d6-f2d026e1574a), folder /datum, env
+#   prod, by the `datum-secret-sync` GitHub sync. Add or rotate them THERE,
+#   never by hand in GitHub: the next sync overwrites a hand-set value. Names
+#   match 1:1 (all upper-case already), so no remapping is needed:
+#
+#     Infisical /datum key        GitHub secret               required  read by
+#     PLEX_API_KEY                PLEX_API_KEY                yes       plex_api.py (Plex consumer key)
+#     SUPABASE_URL                SUPABASE_URL                yes       supabase_client.py
+#     SUPABASE_SERVICE_ROLE_KEY   SUPABASE_SERVICE_ROLE_KEY   yes       supabase_client.py (bypasses RLS)
+#     APS_CLIENT_ID               APS_CLIENT_ID               yes       aps_client.py
+#     APS_CLIENT_SECRET           APS_CLIENT_SECRET           yes       aps_client.py
+#     PLEX_API_SECRET             PLEX_API_SECRET             no        plex_api.py (optional today)
+#     PLEX_TENANT_ID              PLEX_TENANT_ID              no        plex_api.py (default is the Grace tenant)
+#
+#   The rotating APS refresh token is NOT a GitHub or Infisical secret. It
+#   lives in the Supabase row public.runtime_state (key aps_refresh_token),
+#   which the sync reads at the start of every run and rewrites with the
+#   rotated token before any API call uses it (APS_TOKEN_STORE=supabase). The
+#   runner therefore needs no Infisical access at all: no CLI, no identity.
+#
+#   The Plex side is read-only here. Nothing in this workflow enables Plex
+#   writes, and nothing overrides the Plex base URL. Keep it that way.
+#
+# WHEN IT FAILS
+#   - "Credentials present" fails: a required secret is missing or empty in
+#     GitHub. Add it in Infisical (prod, /datum), let datum-secret-sync push it
+#     to GitHub, then re-run the workflow.
+#   - "Fusion -> Supabase sync" fails with exit 2 (nothing processed):
+#       * "refresh token rejected" or "runtime_state ... seed it": the APS
+#         refresh token is dead (15 idle days, or consumed elsewhere) or the
+#         row was never seeded. Re-seed it from a workstation with
+#         `datum-aps-consent` (default store is supabase), then re-run.
+#       * Supabase/APS connection or auth errors: check SUPABASE_URL,
+#         SUPABASE_SERVICE_ROLE_KEY, APS_CLIENT_ID, APS_CLIENT_SECRET in
+#         Infisical prod /datum.
+#   - "Fusion -> Supabase sync" fails with exit 1: some libraries failed
+#     validation or upsert; the rest were synced. The log tail in the Summary (full
+#     log in the nightly-sync-logs artifact) names them. Fix the library in
+#     Fusion (or the validator) and re-run.
+#   - "Tool-qty sync" is skipped when the sync step fails, and fails on its own
+#     errors the same way (see the Summary and the nightly-sync-logs artifact).
+#   - Re-run from the Actions tab, or from a shell:
+#       gh workflow run nightly-sync.yml --repo grace-xwerks/datum
+#       gh workflow run nightly-sync.yml --repo grace-xwerks/datum -f dry_run=true
+#     A dry run reads and validates everything but writes nothing to Supabase
+#     (the APS refresh token still rotates, because that is how APS auth works).
+
+name: Nightly sync (Fusion -> Supabase)
+
+on:
+  schedule:
+    - cron: "17 5 * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run: read and validate only, write nothing to Supabase."
+        required: false
+        default: false
+        type: boolean
+
+concurrency:
+  group: nightly-sync
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            pyproject.toml
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .
+
+      - name: Credentials present
+        # Fail fast, before touching APS, Plex or the database, and say exactly
+        # what is missing. Secrets are scoped to the steps that need them, not
+        # the whole job, so checkout / pip never see them. Values are only
+        # tested for emptiness here, never printed.
+        env:
+          PLEX_API_KEY: ${{ secrets.PLEX_API_KEY }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          APS_CLIENT_ID: ${{ secrets.APS_CLIENT_ID }}
+          APS_CLIENT_SECRET: ${{ secrets.APS_CLIENT_SECRET }}
+          PLEX_API_SECRET: ${{ secrets.PLEX_API_SECRET }}
+          PLEX_TENANT_ID: ${{ secrets.PLEX_TENANT_ID }}
+        run: |
+          missing=()
+          for name in PLEX_API_KEY SUPABASE_URL SUPABASE_SERVICE_ROLE_KEY APS_CLIENT_ID APS_CLIENT_SECRET; do
+            value="${!name}"
+            if [ -z "${value//[[:space:]]/}" ]; then
+              missing+=("$name")
+            fi
+          done
+          if [ "${#missing[@]}" -gt 0 ]; then
+            list="${missing[*]}"
+            echo "::error title=Sync credentials missing::Missing repository secret(s): ${list// /, }. These secrets are synced into GitHub from Infisical (project \"Grace Engineering\", folder /datum, env prod) by the datum-secret-sync sync. Fix them THERE, not by hand in GitHub, or the next sync overwrites a hand-set value. See the header of .github/workflows/nightly-sync.yml."
+            exit 1
+          fi
+          for name in PLEX_API_SECRET PLEX_TENANT_ID; do
+            value="${!name}"
+            if [ -z "${value//[[:space:]]/}" ]; then
+              echo "::notice::Optional secret ${name} is not set; the code default applies."
+            fi
+          done
+
+      - name: Fusion -> Supabase sync
+        # The dispatch input goes through an env var, never interpolated into
+        # the script text. DATUM_DISABLE_INFISICAL stops bootstrap from trying
+        # to export secrets (they are already in the environment); the APS
+        # refresh token comes from, and is rotated back into, Supabase.
+        env:
+          PLEX_API_KEY: ${{ secrets.PLEX_API_KEY }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          APS_CLIENT_ID: ${{ secrets.APS_CLIENT_ID }}
+          APS_CLIENT_SECRET: ${{ secrets.APS_CLIENT_SECRET }}
+          PLEX_API_SECRET: ${{ secrets.PLEX_API_SECRET }}
+          PLEX_TENANT_ID: ${{ secrets.PLEX_TENANT_ID }}
+          APS_TOKEN_STORE: supabase
+          DATUM_DISABLE_INFISICAL: "1"
+          PYTHONUNBUFFERED: "1"
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -o pipefail
+          # An unset optional secret reaches the step as an empty string, which
+          # would override the code default (plex_api.py reads PLEX_TENANT_ID
+          # with os.environ.get). Drop empties so the defaults apply.
+          for name in PLEX_API_SECRET PLEX_TENANT_ID; do
+            value="${!name}"
+            if [ -z "${value//[[:space:]]/}" ]; then
+              unset "$name"
+            fi
+          done
+          args=(--log-file "$RUNNER_TEMP/sync.log")
+          if [ "$DRY_RUN" = "true" ]; then
+            args+=(--dry-run)
+          fi
+          datum-sync "${args[@]}" 2>&1 | tee "$RUNNER_TEMP/sync_console.log"
+
+      - name: Tool-qty sync
+        # Runs only if the sync step succeeded (default step condition). A
+        # no-op until tools are linked, but it is the second GRACE144 job and
+        # dies with the first.
+        env:
+          PLEX_API_KEY: ${{ secrets.PLEX_API_KEY }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          APS_CLIENT_ID: ${{ secrets.APS_CLIENT_ID }}
+          APS_CLIENT_SECRET: ${{ secrets.APS_CLIENT_SECRET }}
+          PLEX_API_SECRET: ${{ secrets.PLEX_API_SECRET }}
+          PLEX_TENANT_ID: ${{ secrets.PLEX_TENANT_ID }}
+          APS_TOKEN_STORE: supabase
+          DATUM_DISABLE_INFISICAL: "1"
+          PYTHONUNBUFFERED: "1"
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -o pipefail
+          for name in PLEX_API_SECRET PLEX_TENANT_ID; do
+            value="${!name}"
+            if [ -z "${value//[[:space:]]/}" ]; then
+              unset "$name"
+            fi
+          done
+          args=(--log-file "$RUNNER_TEMP/sync_inventory.log")
+          if [ "$DRY_RUN" = "true" ]; then
+            args+=(--dry-run)
+          fi
+          datum-sync-inventory "${args[@]}" 2>&1 | tee "$RUNNER_TEMP/sync_inventory_console.log"
+
+      - name: Summary
+        if: always()
+        env:
+          JOB_STATUS: ${{ job.status }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          scope="live (writes to Supabase)"
+          if [ "$DRY_RUN" = "true" ]; then
+            scope="dry-run (no Supabase writes)"
+          fi
+          # Last lines only; mask any user:password@ that a driver error might echo.
+          tail_masked() {
+            tail -n 25 "$1" | sed -E 's#(://[^:/@[:space:]]*:)[^@[:space:]]*@#\1***@#g'
+          }
+          {
+            echo "### Fusion -> Supabase nightly sync"
+            echo
+            echo "Status: **${JOB_STATUS}** | scope: ${scope}"
+            echo
+            for entry in "Fusion -> Supabase sync|sync.log" "Tool-qty sync|sync_inventory.log"; do
+              title="${entry%%|*}"
+              file="$RUNNER_TEMP/${entry##*|}"
+              echo "#### ${title}"
+              echo
+              if [ -s "$file" ]; then
+                echo '```'
+                tail_masked "$file"
+                echo '```'
+              else
+                echo "_No output (this step was skipped, or an earlier step failed before it started)._"
+              fi
+              echo
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-sync-logs
+          path: |
+            ${{ runner.temp }}/sync.log
+            ${{ runner.temp }}/sync_inventory.log
+          retention-days: 14
+          if-no-files-found: ignore

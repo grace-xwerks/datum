@@ -9,7 +9,7 @@ before anything reads them.
 Precedence (highest first), all via ``os.environ`` setdefault semantics:
 
     1. shell     — anything already in the real environment ALWAYS wins
-    2. infisical — ``infisical export`` of project ``datum`` (machine identity)
+    2. infisical — ``infisical export`` of folder ``/datum`` in the Grace Engineering project (machine identity)
     3. .env.local — gitignored dotenv file, the local fallback
 
 On import, ``load_infisical()`` runs first and ``load_env_local()`` second,

@@ -32,13 +32,13 @@ in both `dev` and `prod`. The GitHub secret has the same name as the key.
 
 | Key | Infisical | GitHub secret | Consumer | Notes |
 |---|---|---|---|---|
-| `PLEX_API_KEY` | `/datum` dev + prod | `PLEX_API_KEY` (required) | `plex_api.py` | Consumer Key of the `Datum` app. Expires every 31 days ([#14](https://github.com/grace-xwerks/datum/issues/14)). |
-| `PLEX_API_SECRET` | `/datum` dev + prod | `PLEX_API_SECRET` (optional) | `plex_api.py` | Plex authenticates on the key alone today. |
+| `PLEX_API_KEY` | `/datum` dev + prod | `PLEX_API_KEY` (required) | `plex_api.py` | Consumer Key of the **`Manage2Plex`** app, shared with plex_mcp (copied from the Grace Engineering project root; Datum no longer uses a separate "Datum" Developer Portal key). One rotation covers both repos. Expires every 31 days ([#14](https://github.com/grace-xwerks/datum/issues/14)). |
+| `PLEX_API_SECRET` | `/datum` dev + prod | `PLEX_API_SECRET` (optional) | `plex_api.py` | The `Manage2Plex` secret, if set; Plex authenticates on the key alone today. |
 | `PLEX_TENANT_ID` | `/datum` dev + prod | `PLEX_TENANT_ID` (optional) | `plex_api.py` | Not secret. The code default is the Grace tenant. |
 | `SUPABASE_URL` | `/datum` dev + prod | `SUPABASE_URL` (required) | `supabase_client.py` | Not secret. The `datum` project (`crimblieyypiyarssoel`). |
 | `SUPABASE_SERVICE_ROLE_KEY` | `/datum` dev + prod | `SUPABASE_SERVICE_ROLE_KEY` (required) | `supabase_client.py` | Bypasses RLS. Server-side only; never ship it to a browser. |
-| `APS_CLIENT_ID` | `/datum` dev + prod | `APS_CLIENT_ID` (required) | `aps_client.py` | APS app credentials. |
-| `APS_CLIENT_SECRET` | `/datum` dev + prod | `APS_CLIENT_SECRET` (required) | `aps_client.py` | APS app credentials. |
+| `APS_CLIENT_ID` | `/datum` dev + prod | `APS_CLIENT_ID` (required) | `aps_client.py` | Client ID of the **"Datum" APS app**. Not the root-level `APS_*` keys in Grace Engineering: those are the "Manage Lab" app and fail with `Request error` / `invalid_credentials`. |
+| `APS_CLIENT_SECRET` | `/datum` dev + prod | `APS_CLIENT_SECRET` (required) | `aps_client.py` | Secret of the **"Datum" APS app** (same warning as above). |
 | `APS_REFRESH_TOKEN` | **not in Infisical** | **not a GitHub secret** | `SupabaseTokenStore` | Row `aps_refresh_token` in `public.runtime_state` (datum Supabase project). See the lifecycle section. |
 
 That is 7 keys in Infisical. Deliberately stored nowhere:
@@ -236,7 +236,7 @@ mapping and failure notes).
   Supabase, and still rotates the APS token.
 - **Steps:** checkout, Python 3.12, `pip install -e .`, **Credentials present**,
   **Fusion -> Supabase sync** (`datum-sync`), **Tool-qty sync**
-  (`datum-sync-inventory`, a no-op until tools are linked to Plex), **Summary**
+  (`datum-sync-inventory`, a warning and exit 0 until tools are linked to Plex, PR #34), **Summary**
   (status plus the last 25 log lines of each step in the run's step summary,
   `user:password@` masked), **Upload logs** (artifact `nightly-sync-logs`, 14
   days).
@@ -244,11 +244,26 @@ mapping and failure notes).
   `DATUM_DISABLE_INFISICAL=1`. Plex writes are never enabled and the Plex base
   URL is never overridden. Runs are serialized (`concurrency: nightly-sync`).
 - **Exit codes (`datum-sync`):** 0 all libraries synced, 1 some libraries failed
-  validation or upsert (the rest were synced), 2 fatal / nothing processed.
+  validation (at the STAGING stage) or upsert (the rest were synced), 2 fatal / nothing processed.
 
 Without `--local`, APS is the **only** source. A dead token or missing config
 logs one `CRITICAL` line naming the cause and exits 2; there is no fallback to
 local ADC files, because that would hide a dead token.
+
+### Validation stage
+
+`datum-sync` validates each library at the **STAGING** stage (`ValidationStage.STAGING`,
+PR #32; spec: [`validate_library_spec.md`](./validate_library_spec.md), "Stages").
+At STAGING a missing or duplicate `product-id` and a missing `description` are
+warnings, not failures: the Supabase layer dedups on `fusion_guid`, and
+`populate_supply_items` skips tools without a `product-id` before anything
+reaches Plex. The stricter `PLEX` stage (the default for `validate_library`) is
+what a future Plex writeback ([#1](https://github.com/grace-xwerks/datum/issues/1)) will use. So a red `datum-sync` (exit 1)
+now means a real STRUCT, guid, type or geometry failure in a library, not a
+missing `product-id`; if you see `product-id` errors in a failure, something
+is validating at the wrong stage. Every Fusion library has tools without a
+`product-id`, so the warnings in the log are expected. Duplicate `product_id`
+values reaching `plex_supply_items` are tracked in [#33](https://github.com/grace-xwerks/datum/issues/33).
 
 ### Reading a red run
 
@@ -260,7 +275,7 @@ local ADC files, because that would hide a dead token.
 | `APS sync failed (auth error): could not read public.runtime_state …` | Supabase read failed: wrong URL or key, project unreachable, or migration 0008 not applied. | Check `SUPABASE_URL` / `SUPABASE_SERVICE_ROLE_KEY` in Infisical prod; confirm the table exists. |
 | `APS sync failed (auth error): refresh token rejected — re-seed with datum-aps-consent` | Dead or consumed token. | Re-seed (lifecycle section), re-run. |
 | `APS sync failed (auth error): refresh token write-back failed: …` | Autodesk issued a new token but the Supabase upsert failed, so the row now holds a spent token. The run stopped before using the new chain. | Fix the Supabase problem named in the message, then re-seed with `datum-aps-consent`. |
-| `datum-sync` exit 1 | Some libraries failed validation or upsert. | The failed names are in the step summary; fix the library in Fusion (or the validator) and re-run. |
+| `datum-sync` exit 1 | Some libraries failed validation (STAGING: a real STRUCT / guid / type / geometry failure) or upsert. | The failed names are in the step summary; fix the library in Fusion (or the validator) and re-run. |
 | **Tool-qty sync** skipped | It only runs when the sync step succeeded. | Fix the sync step first. |
 | No run at all for a night | GitHub skipped or delayed the schedule. | Look for a gap in `public.libraries.ingested_at`; dispatch a run by hand. |
 
@@ -345,10 +360,11 @@ never sees a value.
    Supabase project (overlord, via the Supabase MCP). The checklist above done.
    Then seed the row once with `datum-aps-consent`.
 3. `workflow_dispatch` with `dry_run=true` is green; then a real dispatch
-   advances `ingested_at`.
+   advances `ingested_at`. **Done 2026-10-14:** run 38625485799 succeeded
+   (10 libraries, 224 tools, 753 presets) and every `ingested_at` advanced.
 4. The first **scheduled** run is green. Then disable the two GRACE144 Task
    Scheduler jobs ("Datum Nightly Sync" 00:00, "Datum Nightly Inventory Sync"
-   00:30; neither has written since 2026-04-10), then delete them along with
+   00:30; neither ever wrote, because the CLI failed validation until PR #32), then delete them along with
    that host's `.env.local` and `.aps_tokens.json`.
 5. Close #16 and #18 by hand, and update the Notion Current State block and
    Decision Log.

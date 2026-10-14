@@ -116,11 +116,13 @@ legacy PR #97; `master` has only gained `.gitattributes` since).
 | Area | State |
 |---|---|
 | **Supabase `datum` project** | Verified via the Supabase MCP (re-bound to the Grace org). Healthy, Postgres 17, 15 migrations applied (latest three dated 2026-10-13: `item_suppliers`, `approved_suppliers`, `supply_items_widen`). `public`: `libraries` 7, `tools` 155, `cutting_presets` 631, `reference_catalog` 85,306, `holder_catalog` 405, `plex_supply_items` 0. `plex` mirror: all 12 master tables refreshed 2026-10-14 13:25 UTC; production-history tables run daily at 06:00 UTC via pg_cron → edge function, last OK 2026-10-14. The "last ran 2026-08-18" note above is superseded. |
-| **Nightly Fusion → Supabase sync** | **Dead since 2026-04-10.** Every `libraries.ingested_at` equals 2026-04-10 15:26 UTC and `source_modified_at` is NULL everywhere, so the GRACE144 "Datum Nightly Sync" task has not written since the day it was deployed. No tools are linked to Plex and `qty_synced_at` is NULL throughout. Tracked in [#18](https://github.com/grace-xwerks/datum/issues/18); the Actions replacement landed later the same day (see the "Infisical + Actions sync" row below). |
+| **Nightly Fusion → Supabase sync** | **Never passed validation; now live on Actions.** The earlier reading here ("dead since 2026-04-10", GRACE144 stopped writing) had the wrong cause. The `libraries.ingested_at` stamp of 2026-04-10 15:26 UTC came from the one manual `/api/aps/sync` run that predates the validation gate. The gate (shipped April 8, legacy PR #28) treats a missing or duplicate `product-id` as FAIL, every Fusion library has such tools, so the nightly CLI never passed validation, on GRACE144 or anywhere. Proven by Actions run 38623375506 (dry run: "0 succeeded, 3 skipped, 10 failed", all on `REQUIRED_FIELD product-id` / `DUPLICATE_PRODUCT_ID`, one `description`). Fixed by PR #32 (staging-stage validation) and PR #34 (see the row below). **First live run on Actions, run 38625485799, succeeded:** 10 libraries, 224 tools, 753 presets; supply-item staging 201 staged / 24 skipped; every `libraries.ingested_at` advanced to 2026-10-14 19:39–19:40 UTC; `source_modified_at` is populated for the first time (878 MAZAK INTEGREX last modified in Fusion 2026-09-30, 848 on 2026-08-21, 879 on 2026-07-09). No tools are linked to Plex yet and `qty_synced_at` is NULL throughout (linking waits on the Plex writeback, [#1](https://github.com/grace-xwerks/datum/issues/1)). Tracked in [#18](https://github.com/grace-xwerks/datum/issues/18). |
 | **GitHub Actions** | **Root cause found.** The repo was created on 2026-05-01 as a *fork* of `just-shane/plex-api`, and GitHub disables workflows on forks until a repo admin clicks "enable" on the Actions tab. Not an org policy: repo-level Actions was already enabled with all actions allowed, the `tests` workflow was `active`, and the repo is public (unlimited minutes). Shane enabled the workflows on 2026-10-14; PR #20 (new-repo numbering) was the first run (pull_request 20s, push 15s, both green). **Then set the same day:** branch protection on `master` requiring the `pytest` context (strict=false, no reviews, enforce_admins=false, no force-push/deletion) and repo `allow_auto_merge=true`. Shane then left the fork network the same day; the `upstream` remote was removed from the local clone and the `gh repo set-default` warnings dropped from CLAUDE.md / BRIEFING. |
 | **GCP migration (#7)** | **Abandoned.** Project `datum-prod-493615` has billing disabled, its VMs are gone, and neither of Shane's Google accounts has IAM on it; deletion requested of a Grace admin 2026-10-14. `scripts/gcp/` and `docs/NEXT_SESSION.md` removed. See the banner in `docs/GCP_MIGRATION.md`. |
 | **Issues opened** | [#16](https://github.com/grace-xwerks/datum/issues/16) Infisical secrets, [#17](https://github.com/grace-xwerks/datum/issues/17) port holder-catalog work from `claude/awesome-ishizaka`, [#18](https://github.com/grace-xwerks/datum/issues/18) nightly sync → GitHub Actions. Follow-up [#28](https://github.com/grace-xwerks/datum/issues/28): keep the Infisical access token off argv. |
-| **Infisical + Actions sync (evening)** | **Code landed, rollout not finished.** PRs #23 (design spec), #24 (`bootstrap.load_infisical` + `describe_sources`), #25 (pluggable APS token store), #26 (`sync.py` no silent local fallback; `run_dev.py` skips Infisical-sourced keys; `credential_sources` in `tenant_whoami`), #27 (spec amended after the Infisical billing review), #29 (`.github/workflows/nightly-sync.yml`), #30 (`SupabaseTokenStore`, `datum-aps-consent --store`, `DATUM_INFISICAL_PATH`, migration `0008_runtime_state.sql`). **583 tests** pass (was 440). Migration 0008 is applied to the datum Supabase project (`public.runtime_state`, RLS on, no policies). **Billing decision:** Infisical is on Legacy Pro at $18 per identity; identities went 6 → 3 the same day (Shane, `github-actions-capitoltrace`, `grace-workstation-shane`, the last being `plex-mcp-workstation-shane` renamed, rename pending on Shane's side). Datum adds **zero** identities and no new Infisical project: its 7 keys go in folder `/datum` of Grace Engineering (`8e04285d-bdf4-4836-b1d6-f2d026e1574a`), and the rotating APS refresh token lives in a Supabase row instead of Infisical. **Still to do (Shane):** create `/datum` + the 7 keys in `dev` and `prod`; rename the identity and copy its file to `~/.config/datum/`; create GitHub secret sync `datum-secret-sync` (`prod` `/datum` → this repo); seed the token with `datum-aps-consent`; then a `dry_run` dispatch, a real dispatch, and the first scheduled run. After that the GRACE144 jobs ("Datum Nightly Sync" 00:00, "Datum Nightly Inventory Sync" 00:30) are disabled, then deleted with that host's `.env.local` and `.aps_tokens.json`. [#16](https://github.com/grace-xwerks/datum/issues/16) and [#18](https://github.com/grace-xwerks/datum/issues/18) stay open until that completes. See [`docs/SECRETS.md`](./SECRETS.md). |
+| **Infisical + Actions sync (evening)** | **Rollout complete through the first live run.** PRs #23 (design spec), #24 (`bootstrap.load_infisical` + `describe_sources`), #25 (pluggable APS token store), #26 (`sync.py` no silent local fallback; `run_dev.py` skips Infisical-sourced keys; `credential_sources` in `tenant_whoami`), #27 (spec amended after the Infisical billing review), #29 (`.github/workflows/nightly-sync.yml`), #30 (`SupabaseTokenStore`, `datum-aps-consent --store`, `DATUM_INFISICAL_PATH`, migration `0008_runtime_state.sql`). **583 tests** pass (was 440; 621 after PRs #32 and #34). Migration 0008 is applied to the datum Supabase project (`public.runtime_state`, RLS on, no policies). **Billing decision:** Infisical is on Legacy Pro at $18 per identity; identities went 6 → 3 the same day (Shane, `github-actions-capitoltrace`, `grace-workstation-shane`, the last being `plex-mcp-workstation-shane` renamed, rename pending on Shane's side). Datum adds **zero** identities and no new Infisical project: its 7 keys go in folder `/datum` of Grace Engineering (`8e04285d-bdf4-4836-b1d6-f2d026e1574a`), and the rotating APS refresh token lives in a Supabase row instead of Infisical. **Done since (Shane, evening):** `/datum` and its 7 keys exist in `dev` and `prod`, the identity is renamed `grace-workstation-shane`, GitHub secret sync `datum-secret-sync` is live, and the APS refresh token row in `public.runtime_state` was seeded 2026-10-14 19:23 UTC (it has rotated on every run since). **Still to do:** the first *scheduled* run must be green; after that the GRACE144 jobs ("Datum Nightly Sync" 00:00, "Datum Nightly Inventory Sync" 00:30) are disabled, then deleted with that host's `.env.local` and `.aps_tokens.json`. [#16](https://github.com/grace-xwerks/datum/issues/16) and [#18](https://github.com/grace-xwerks/datum/issues/18) are closed by hand once that is confirmed. See [`docs/SECRETS.md`](./SECRETS.md). |
+| **Validation stage (PR #32, PR #34)** | PR #32: `validate_library` gained `ValidationStage` (`PLEX` is the default and the old behaviour; `STAGING` makes `product-id` / `description` presence and `product-id` duplicates WARN). `sync.py` validates at STAGING. Rationale: Supabase dedups on `fusion_guid`, already held 57 of 155 tools with an empty `product_id`, and `populate_supply_items` skips tools without one before anything reaches Plex. Spec `docs/validate_library_spec.md` has a "Stages" section. PR #34: `datum-sync-inventory` exits 0 (warning) when no tool is linked, since linking only happens when the Plex writeback ([#1](https://github.com/grace-xwerks/datum/issues/1)) ships; the old exit 2 would have reddened every nightly. Follow-up [#33](https://github.com/grace-xwerks/datum/issues/33): a duplicate `product_id` can still reach `plex_supply_items`, which matters when #1 ships. |
+| **Credentials as configured (2026-10-14)** | Grace Engineering Infisical project, folder `/datum`, envs `dev` + `prod`, 7 keys. **Datum now uses the `Manage2Plex` Plex Consumer Key** (plex_mcp's app), copied from the project root, not the separate "Datum" Developer Portal app key the repo used before; one rotation now covers both repos ([#14](https://github.com/grace-xwerks/datum/issues/14)). The APS credentials are the **"Datum" APS app**; the root-level `APS_*` keys in Grace Engineering belong to the "Manage Lab" app and caused a `Request error` / `invalid_credentials` detour. |
 
 ---
 
@@ -178,7 +180,7 @@ Fusion 360 tool libraries
          └── production/v1/production-definitions/workcenters  machine setup docs (per-id write — blocked on Classic API, #6)
 ```
 
-The nightly sync runs via the `sync.py` CLI (PR #44). It was scheduled on GRACE144 Task Scheduler (PR #47) — **but that host has not written since 2026-04-10** (see the 2026-10-14 status snapshot). Its replacement is `.github/workflows/nightly-sync.yml` on GitHub Actions ([#18](https://github.com/grace-xwerks/datum/issues/18), code merged; rollout pending), which also drops the silent local-ADC fallback; secrets move to Infisical ([#16](https://github.com/grace-xwerks/datum/issues/16), same state). The GCP migration (#7) was **abandoned on 2026-10-14** — `docs/GCP_MIGRATION.md` is a historical record only. Supabase stays.
+The nightly sync runs via the `sync.py` CLI (PR #44). It was scheduled on GRACE144 Task Scheduler (PR #47) — **but that CLI never passed validation** (the gate treated a missing or duplicate `product-id` as FAIL; see the 2026-10-14 status snapshot), so it never wrote. Its replacement is `.github/workflows/nightly-sync.yml` on GitHub Actions ([#18](https://github.com/grace-xwerks/datum/issues/18)), which validates at the STAGING stage (PR #32), also drops the silent local-ADC fallback, and had its first live run on 2026-10-14 (run 38625485799, success); secrets moved to Infisical ([#16](https://github.com/grace-xwerks/datum/issues/16), live). The GCP migration (#7) was **abandoned on 2026-10-14** — `docs/GCP_MIGRATION.md` is a historical record only. Supabase stays.
 
 ### Industry hierarchy (Plex data model)
 
@@ -429,9 +431,9 @@ Sync filter: include only `type != "holder" AND type != "probe"`
 
 ### sync.py + nightly deploy (PRs #44, #46, #47, #26, #29, #30)
 - `sync.py` CLI entrypoint (`datum-sync`); `--log-file` for persistent logs (PR #46)
-- **APS is the only source without `--local`** (PR #26). A config or auth failure logs one `CRITICAL` line naming the cause and exits 2; it no longer falls back to the local ADC files, which hid a dead token. `--local` is explicit and keeps its 25-hour stale-file guard. Exit codes: 0 all synced, 1 some libraries failed, 2 fatal / nothing processed. Startup logs the "Credential sources:" table
+- **APS is the only source without `--local`** (PR #26). A config or auth failure logs one `CRITICAL` line naming the cause and exits 2; it no longer falls back to the local ADC files, which hid a dead token. `--local` is explicit and keeps its 25-hour stale-file guard. Exit codes: 0 all synced, 1 some libraries failed, 2 fatal / nothing processed. Since PR #32 it validates at the STAGING stage, so a missing or duplicate `product-id` and a missing `description` are warnings and exit 1 means a real STRUCT / guid / type / geometry failure. Startup logs the "Credential sources:" table
 - **Scheduler: GitHub Actions** (`.github/workflows/nightly-sync.yml`, PR #29): cron `17 5 * * *` UTC (00:17 America/Chicago in CDT) plus `workflow_dispatch` with a `dry_run` input. It runs `datum-sync` then `datum-sync-inventory`, reads only repo secrets (synced from Infisical `prod` `/datum` by `datum-secret-sync`), sets `APS_TOKEN_STORE=supabase` and `DATUM_DISABLE_INFISICAL=1`, and has no Infisical CLI or identity. Failures are red runs with a step summary and a 14-day log artifact. A `--dry-run` still rotates the APS refresh token (the refresh consumes the old one)
-- **Retired:** the GRACE144 Task Scheduler jobs (PR #47: "Datum Nightly Sync" 00:00, "Datum Nightly Inventory Sync" 00:30). They have not written since 2026-04-10. To be disabled after the first green scheduled Actions run, then deleted together with that host's `.env.local` and `.aps_tokens.json`
+- **Retired:** the GRACE144 Task Scheduler jobs (PR #47: "Datum Nightly Sync" 00:00, "Datum Nightly Inventory Sync" 00:30). They never wrote: the CLI failed validation on every run (the 2026-04-10 stamp was a manual `/api/aps/sync`). The first live Actions run succeeded on 2026-10-14; to be disabled after the first green *scheduled* Actions run, then deleted together with that host's `.env.local` and `.aps_tokens.json`
 - Runbook for red runs, token seeding and rotation: [`docs/SECRETS.md`](./SECRETS.md)
 
 ### React UI (PR #41 + successive)
@@ -504,7 +506,7 @@ credential on the runner.
   2026-10-14** (strict up-to-date not required, no review requirement,
   `enforce_admins` off so an admin can bypass in an emergency, force-push and
   deletion blocked). Run `pytest` locally before every push regardless.
-- Currently **583 tests**, all green (as of 2026-10-14; 440 on 2026-10-13, 262 on 2026-04-17). Run them with the repo venv, `.venv\Scripts\python -m pytest`: bare `py` lacks Flask on Shane's machine.
+- Currently **621 tests**, all green (as of 2026-10-14 evening; 583 earlier that day, 440 on 2026-10-13, 262 on 2026-04-17). Run them with the repo venv, `.venv\Scripts\python -m pytest`: bare `py` lacks Flask on Shane's machine.
 
 ---
 
@@ -730,7 +732,7 @@ the "Credential sources:" block `sync.py` logs at startup.*
 
 Reverse chronological. Each entry: what was the goal, what landed, what's left.
 
-### 2026-10-14 — Supabase verified, nightly sync found dead, GCP cutover abandoned, Infisical + Actions sync built
+### 2026-10-14 — Supabase verified, nightly sync found never-passing, GCP cutover abandoned, Infisical + Actions sync built and run live
 
 **Goal:** Re-orient after the 2026-10-13 docs sweep, verify the Supabase side
 now that the MCP is bound to the right org, and decide what to do about the
@@ -739,7 +741,7 @@ half-provisioned GCP migration.
 **Done:**
 
 - Supabase `datum` project verified live (see the 2026-10-14 status snapshot).
-  Found the Fusion → Supabase nightly sync has not written since 2026-04-10.
+  Found the Fusion → Supabase nightly sync had not written since 2026-04-10 (cause corrected in the evening, below).
 - Opened [#16](https://github.com/grace-xwerks/datum/issues/16) (Infisical),
   [#17](https://github.com/grace-xwerks/datum/issues/17) (holder-catalog port),
   [#18](https://github.com/grace-xwerks/datum/issues/18) (sync → GitHub Actions).
@@ -765,18 +767,34 @@ half-provisioned GCP migration.
   `runtime_state` migration (0008, applied) + `datum-aps-consent --store` +
   `DATUM_INFISICAL_PATH`. Tests 440 → 583. New operator doc `docs/SECRETS.md`
   and the credential rules in CLAUDE.md / README updated.
+- Late evening: rollout and first live run. The earlier "dead since
+  2026-04-10" story was wrong in cause: that stamp was the one manual
+  `/api/aps/sync` run, which predates the validation gate (April 8); the gate
+  fails any missing or duplicate `product-id`, every Fusion library has such
+  tools, so the nightly CLI never passed validation, on GRACE144 or anywhere.
+  Proven by Actions run 38623375506 (dry run: 0 succeeded, 3 skipped, 10
+  failed). PR #32 added `ValidationStage` (`sync.py` validates at STAGING;
+  presence and duplicate `product-id` and `description` are WARN, because
+  Supabase dedups on `fusion_guid`, already held 57 of 155 tools with an empty
+  `product_id`, and `populate_supply_items` skips them before Plex). PR #34
+  made `datum-sync-inventory` exit 0 when no tool is linked. Shane finished the
+  Infisical side (folder `/datum`, 7 keys, `datum-secret-sync`, identity renamed
+  `grace-workstation-shane`); Datum now uses the `Manage2Plex` Plex key, and the
+  "Datum" APS app (the root-level `APS_*` keys are the "Manage Lab" app and
+  gave `invalid_credentials`). The APS token row was seeded 19:23 UTC. **First
+  live run, Actions run 38625485799, succeeded:** 10 libraries, 224 tools, 753
+  presets, supply-item staging 201 staged / 24 skipped, every
+  `libraries.ingested_at` advanced (19:39-19:40 UTC), `source_modified_at`
+  populated for the first time. Tests 583 -> 621. Filed
+  [#33](https://github.com/grace-xwerks/datum/issues/33) (duplicate `product_id` reaching `plex_supply_items`).
 
-**What's left:** the sync is still dead until the rollout finishes, so this is
-the most urgent item. Shane: create `/datum` + the 7 keys in Grace Engineering
-(`dev`, `prod`); rename `plex-mcp-workstation-shane` → `grace-workstation-shane`
-and copy its identity file to `~/.config/datum/`; create GitHub secret sync
-`datum-secret-sync`; run `datum-aps-consent` once. Then a `dry_run`
-`workflow_dispatch`, a real dispatch (watch `libraries.ingested_at` advance),
-and the first scheduled run. After that, disable then delete the two GRACE144
+**What's left:** the first *scheduled* Actions run must come up green (watch
+`libraries.ingested_at`). After that, disable then delete the two GRACE144
 Task Scheduler jobs and that host's `.env.local` + `.aps_tokens.json`. Then
-close [#16](https://github.com/grace-xwerks/datum/issues/16) and
-[#18](https://github.com/grace-xwerks/datum/issues/18) by hand and update the
-Notion Current State block and Decision Log. Follow-up:
+close [#16](https://github.com/grace-xwerks/datum/issues/16) and [#18](https://github.com/grace-xwerks/datum/issues/18) by hand and update the
+Notion Current State block and Decision Log. [#1](https://github.com/grace-xwerks/datum/issues/1) (Plex
+writeback, which is what links tools) and [#14](https://github.com/grace-xwerks/datum/issues/14) (key rotation,
+now shared with plex_mcp) stay open. Follow-up:
 [#28](https://github.com/grace-xwerks/datum/issues/28) (Infisical access token
 off argv).
 

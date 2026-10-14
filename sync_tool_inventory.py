@@ -24,9 +24,11 @@ Usage
 
 Exit codes
 ----------
-    0  All linked tools synced
+    0  All linked tools synced, or nothing linked yet (a benign no-op:
+       tools get a plex_supply_item_id only when the Plex writeback (#1)
+       ships, so an empty run must not fail the nightly job)
     1  One or more tools failed (partial)
-    2  Fatal: config missing, no tools linked, etc.
+    2  Fatal: config missing, Plex/Supabase unreachable, etc.
 """
 from __future__ import annotations
 
@@ -327,8 +329,14 @@ def main(argv: list[str] | None = None) -> int:
     report.print_summary()
 
     if not report.results:
-        log.warning("No linked tools to sync -- populate tools.plex_supply_item_id first")
-        return 2
+        # Benign until the Plex writeback (#1) populates
+        # tools.plex_supply_item_id; the nightly workflow runs this step
+        # every night and must not go red on a known no-op.
+        log.warning(
+            "No linked tools to sync (tools.plex_supply_item_id is empty "
+            "until the Plex writeback ships) -- nothing to do, exit 0"
+        )
+        return 0
 
     return 1 if report.failed else 0
 

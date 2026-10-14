@@ -69,7 +69,7 @@ This document outlines the step-by-step implementation plan for the Autodesk Fus
 Work that has landed since the Phase 1–5 roadmap was written, tracked via GitHub Issues and not part of the original plan:
 
 - **Supabase staging layer (#31, PR #32 + #34)** — `libraries` / `tools` / `cutting_presets` tables on a dedicated Supabase DB. Fusion JSON ingests here first; Plex gets only the identity slice. Table prefix `fusion2plex_` was removed in PR #34 once the DB isolation made it redundant.
-- **APS cloud integration (PR #43)** — `aps_client.py` pulls tool libraries from Autodesk Platform Services. `sync.py` is now APS-first with local ADC as fallback; ADC removal is tracked under the GCP migration epic ([#7](https://github.com/grace-xwerks/datum/issues/7) (legacy #85)).
+- **APS cloud integration (PR #43)** — `aps_client.py` pulls tool libraries from Autodesk Platform Services. `sync.py` is now APS-first with local ADC as fallback; ADC removal is tracked under the GitHub Actions sync migration ([#18](https://github.com/grace-xwerks/datum/issues/18)).
 - **Pre-sync validation gate (#25, PR #28)** — `validate_library.py` with CLI / programmatic / Flask entry points per `docs/validate_library_spec.md`. Gates every sync run.
 - **React UI (PR #41 + subsequent)** — tool browser, library browser, Scripts page, last-sync indicator. Deployed to Cloudflare Workers (PR #70).
 - **Vendor reference catalog + geometry-based enrichment (PR #48)** — `enrich.py`, wired upstream in the sync pipeline (PR #54).
@@ -77,16 +77,12 @@ Work that has landed since the Phase 1–5 roadmap was written, tracked via GitH
 - **Tool inventory qty sync (#75, PRs #77 + #78)** — Plex → Supabase qty cache.
 - **Classic Web Services discovery (PR #42)** — documented the SOAP path that can unblock [#2](https://github.com/grace-xwerks/datum/issues/2) / [#3](https://github.com/grace-xwerks/datum/issues/3) / [#4](https://github.com/grace-xwerks/datum/issues/4). The first-documented `plexonline.com/Modules/Xmla/…` path proved broken; the working endpoint is `api.plexonline.com/DataSource/Service.asmx` (HTTP Basic, needs a dedicated Web Service user — IAM and portal-admin logins were rejected). Access request pending; see `docs/Plex_Classic_API_Request.md`.
 
-## Phase 6: GCP migration (umbrella [#7](https://github.com/grace-xwerks/datum/issues/7) (legacy #85))
+## Phase 6: ~~GCP migration~~ — ABANDONED 2026-10-14
 
-Move Datum off Supabase + Autodesk Desktop Connector and onto GCP + the Autodesk Platform Services HTTP API. Architecture and affected-code map live in [`docs/GCP_MIGRATION.md`](./docs/GCP_MIGRATION.md).
+Epic #7 (legacy #85) is closed. GCP was provisioned on 2026-04-17 but the migration never started; project billing lapsed and the project is being deleted. Supabase stays as the permanent staging/cache store. Full story and the where-did-each-goal-go table: banner at the top of [`docs/GCP_MIGRATION.md`](./docs/GCP_MIGRATION.md).
 
-- [ ] Provision GCP (`datum-dev` e2-standard-2, `datum-runtime` e2-micro, Cloud SQL `db-f1-micro`, Secret Manager) — provisioning scripts `scripts/gcp/00`–`10` landed (PR #86 / #88 / #89, including `08-scheduler.sh`), and [#14](https://github.com/grace-xwerks/datum/issues/14) references the dev VM and project `datum-prod-493615`, so this appears applied; confirm before checking off
-- [ ] Apply schema to Cloud SQL (bare table names, matches current Supabase)
-- [ ] `bootstrap.py` Secret Manager loader path (additive)
-- [ ] `db_client.py` — drop-in replacement for `supabase_client.py`
-- [ ] Replace/refactor `tool_library_loader.py` to APS-backed; remove local-ADC fallback branch in `sync.py`
-- [ ] Update Flask `/api/fusion/validate` GET + `/api/fusion/libraries` to pull from APS
-- [ ] Cloud Scheduler — nightly sync + dev VM start/stop
-- [ ] Cloudflare DNS — `datum.graceops.dev`
-- [ ] Decom Supabase + strip ADC references from docs
+Successor work:
+
+- [ ] Secrets → Infisical (replaces the Secret Manager item) → [#16](https://github.com/grace-xwerks/datum/issues/16)
+- [ ] Nightly sync → GitHub Actions, drop the local-ADC fallback (replaces the Cloud Scheduler and APS-only loader items) → [#18](https://github.com/grace-xwerks/datum/issues/18)
+- [x] Cloudflare DNS `datum.graceops.dev` — already live on Cloudflare Workers since 2026-04-15 (legacy PR #70)

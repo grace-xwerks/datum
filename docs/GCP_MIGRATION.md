@@ -1,12 +1,45 @@
-# GCP Migration — Datum
+# GCP Migration — Datum (ABANDONED 2026-10-14)
 
-**Status:** Planning (2026-04-17). No code changes in the session that wrote this doc.
+> **Status: abandoned.** This plan is kept as a historical record only.
+> Nothing below is current guidance. Umbrella issue
+> [#7](https://github.com/grace-xwerks/datum/issues/7) (legacy #85) is closed.
+>
+> **What happened.** The GCP footprint (project `datum-prod-493615`: VPC,
+> Cloud SQL `datum-db`, VMs `datum-runtime` / `datum-dev`, Secret Manager
+> slots, dev-VM scheduler) was provisioned on 2026-04-17 via `scripts/gcp/`
+> (legacy PRs #86 / #88 / #89). The migration itself never started: the
+> Cloud SQL schema was never applied and no application code was ever
+> pointed at it. Billing on the project lapsed over the summer; by
+> 2026-10-13 every API call returned `BILLING_DISABLED`, the VMs were gone,
+> and neither of Shane's Google accounts had IAM on the project. The only
+> workload the VMs ever hosted (the Plex MCP server) was rebuilt on
+> Cloudflare Containers the same day. Shane requested deletion of the
+> project on 2026-10-14. `scripts/gcp/` and `docs/NEXT_SESSION.md` were
+> removed from the repo in the same change (recoverable from git history).
+>
+> **Where each goal went instead.**
+>
+> | GCP plan item | Replacement |
+> |---|---|
+> | Cloud SQL replaces Supabase | Stay on Supabase. The `plex` mirror schema, pg_cron jobs, edge functions and the Plex MCP cache all depend on it now. |
+> | Secret Manager | Infisical — [#16](https://github.com/grace-xwerks/datum/issues/16) |
+> | Cloud Scheduler nightly sync | GitHub Actions — [#18](https://github.com/grace-xwerks/datum/issues/18) |
+> | `datum-runtime` VM | Not needed. React UI is on Cloudflare Workers; plex-mcp is on Cloudflare Containers. |
+> | `datum-dev` VM | Shane's personal `shane-devbox` GCP project. |
+> | Drop the ADC fallback loader | Still intended, under [#18](https://github.com/grace-xwerks/datum/issues/18) (an Actions runner has no network share). |
+>
+> The "Reorg + stack" companion plan ([`REORG_AND_STACK.md`](./REORG_AND_STACK.md))
+> survives on its own merits but no longer has the Cloud SQL motivation.
+
+---
+
+## Original plan (2026-04-17) — historical
+
+**Status at the time:** Planning. No code changes in the session that wrote this doc.
 **Umbrella issue:** [#7](https://github.com/grace-xwerks/datum/issues/7) (legacy #85)
-**Next-session prompts:** see [`NEXT_SESSION.md`](./NEXT_SESSION.md) for canned
-prompts covering Cloud Scheduler start/stop and the Supabase → Cloud SQL DB
-migration.
+**Next-session prompts:** were in `docs/NEXT_SESSION.md` (removed 2026-10-14).
 
-This document captures the agreed architecture for moving Datum off Supabase +
+This document captured the agreed architecture for moving Datum off Supabase +
 Autodesk Desktop Connector (ADC) + the locked-down work machine, and onto GCP +
 the Autodesk Platform Services (APS) HTTP API. Read this together with
 [`BRIEFING.md`](./BRIEFING.md) for project context and
@@ -241,7 +274,7 @@ implementation PRs will work through.**
 
 ## Cost — `datum-dev` weekday-only schedule
 
-`scripts/gcp/08-scheduler.sh` creates two Cloud Scheduler jobs that
+`scripts/gcp/08-scheduler.sh` (removed 2026-10-14; in git history) created two Cloud Scheduler jobs that
 start `datum-dev` weekdays at 07:00 America/Chicago and stop it at
 19:00 America/Chicago. That's 12h × 5 days × ~4.33 weeks ≈ 260h/mo
 versus 730h/mo for always-on — a ~64% compute reduction.

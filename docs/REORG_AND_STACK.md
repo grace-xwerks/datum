@@ -1,13 +1,17 @@
 # Reorg + Stack Update — Datum
 
-**Status:** Planning (2026-04-17). No code changes in the session that wrote this doc.
-**Trigger:** Grace Engineering has provided Shane company-supplied GCP access and
-budget for Datum. That funds the [GCP migration epic #7](https://github.com/grace-xwerks/datum/issues/7) (legacy #85)
-and opens room for stack changes that wouldn't have been justifiable on a
-zero-budget project.
-**Relationship to #85:** This plan executes *before* the GCP migration. The
-repo ships to Cloud SQL + Cloud Run / VMs easier if it's organized and the DB
-layer is already vendor-neutral. See the sequencing block at the bottom.
+**Status:** Planning (2026-04-17), not started. No code changes have landed from this doc.
+**2026-10-14 update:** the GCP migration this plan was written to precede has
+been **abandoned** (see [`GCP_MIGRATION.md`](./GCP_MIGRATION.md), epic #7
+closed). Supabase stays. The `datum/` package reorg (Phase 1) and the
+SQLAlchemy swap (Phase 2) remain reasonable on their own merits, but the
+"Cloud SQL becomes a connection-string flip" justification is gone, so neither
+is urgent and neither has an issue. Phase 3 (UI scope statement) is unaffected.
+Read everything below as the original 2026-04-17 reasoning.
+**Original trigger:** Grace Engineering had provided company-supplied GCP access
+and budget for Datum, funding the GCP migration epic #7 (legacy #85).
+**Original relationship to #85:** This plan was to execute *before* the GCP
+migration so the repo would ship to Cloud SQL more easily.
 
 ---
 

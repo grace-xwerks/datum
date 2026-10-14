@@ -3,8 +3,13 @@
 **Date:** 2026-10-14
 **Issues:** [#16](https://github.com/grace-xwerks/datum/issues/16) (Infisical),
 [#18](https://github.com/grace-xwerks/datum/issues/18) (nightly sync → Actions)
-**Status:** approved in conversation 2026-10-14 (Shane); implementation plan at
-`docs/superpowers/plans/2026-10-14-infisical-and-actions-sync.md`.
+**Status:** approved in conversation 2026-10-14 (Shane). **Amended 2026-10-14
+(evening)** after the Infisical billing review: Infisical bills $18 per identity
+on the org's Legacy Pro plan, so the design now adds **zero** identities and no
+new project, and the rotating APS refresh token lives in a Supabase row instead
+of Infisical. Agents A, B and C landed before the amendment; B2 reconciles the
+token store, D and E follow the amended text. The work-breakdown table at the end
+is the implementation plan.
 
 ## Goal
 
@@ -30,9 +35,10 @@ rotate the Plex key in one place.
 
 | Decision | Choice | Why |
 |---|---|---|
-| Infisical placement | New project `datum`, envs `dev` + `prod` | Own blast radius and identities; mirrors plex_mcp's layout. Datum's Plex Consumer Key is a different app from plex_mcp's `Manage2Plex` key and the two must not share secrets. |
-| Production APS refresh token | Infisical write-back | APS refresh tokens are single-use and rotate on every refresh (15-day idle expiry). One consumer only. Infisical keeps version history. Supabase-row and APS Service Accounts were considered; SSA support for Fusion Team hubs is unverified. |
-| Secrets into the runner | Infisical → GitHub secret sync (plex_mcp pattern) | The runner reads plain repo secrets; no Infisical code path in CI except the token write-back. |
+| Infisical placement | Folder `/datum` in the **existing Grace Engineering project** (`8e04285d-bdf4-4836-b1d6-f2d026e1574a`), envs `dev` + `prod` | Projects are free but identities are $18/month each on Legacy Pro; one Grace project lets one workstation identity cover plex_mcp and Datum. Datum's keys sit in their own folder so plex_mcp's `Manage2Plex` keys and Datum's Consumer Key never share a path. (Superseded: "new project `datum`".) |
+| Production APS refresh token | **Supabase row** (`public.runtime_state`, service-role only) | APS refresh tokens are single-use and rotate on every refresh (15-day idle expiry); one consumer only. Infisical write-back would need a machine identity on the runner: a shared cross-org OIDC identity is not clean (single bound subject; wildcarding the owner is warned against) and a dedicated one is $18/month. The runner already holds the service-role key, so the row costs nothing and adds no credential. Previous value kept in a column for recovery. (Superseded: Infisical write-back; `InfisicalTokenStore` stays in the code, unused by default.) |
+| Identities | **None new.** `plex-mcp-workstation-shane` → renamed `grace-workstation-shane`, granted read on `/datum` in `dev`. No CI identity: the runner needs no Infisical call at all. | Org identity count stays at 3 (Shane, `github-actions-capitoltrace`, `grace-workstation-shane`) = $54/month on Legacy Pro. |
+| Secrets into the runner | Infisical → GitHub secret sync (plex_mcp pattern) | The runner reads plain repo secrets; **no Infisical code path in CI at all** now that the token lives in Supabase. The Infisical CLI is not installed on the runner. |
 | Local dev auth to Infisical | Machine identity (Universal Auth) via identity file | A human `infisical login` expires every 10 days and draws an interactive prompt on stdout (grace-cam, 2026-09-12). |
 | Cron | `17 5 * * *` (00:17 America/Chicago in CDT) | plex_mcp's first `:00` schedule was dropped by GitHub under load. |
 | Tool-qty sync | Second step in the same workflow | It is a no-op until tools are linked, but it is the second GRACE144 job and should die with the first. |
@@ -40,16 +46,19 @@ rotate the Plex key in one place.
 ## Architecture
 
 ```
-Infisical project `datum`
-  ├── env dev   ── machine identity datum-workstation-shane (read) ──▶ bootstrap.py (local dev)
-  └── env prod  ── GitHub secret sync datum-secret-sync ──▶ repo secrets ──▶ nightly-sync.yml
-                ── machine identity datum-actions (read all; write APS_REFRESH_TOKEN)
-                        ▲                               │
-                        └── write-back after refresh ───┘  InfisicalTokenStore (runner only)
+Infisical project "Grace Engineering" (8e04285d…), folder /datum
+  ├── env dev   ── machine identity grace-workstation-shane (read /datum) ──▶ bootstrap.py (local dev)
+  └── env prod  ── GitHub secret sync datum-secret-sync (/datum) ──▶ repo secrets ──▶ nightly-sync.yml
+
+Supabase project datum (crimblieyypiyarssoel)
+  └── public.runtime_state  ◀── SupabaseTokenStore: read APS refresh token at run start,
+        (RLS on, no policies;      write the rotated one back before any API call uses it
+         service role only)
 
 nightly-sync.yml (schedule 17 5 * * * + workflow_dispatch)
-  checkout → python 3.12 → infisical CLI → pip install -e . → credentials present
+  checkout → python 3.12 → pip install -e . → credentials present
   → datum-sync --log-file → datum-sync-inventory --log-file → summary + artifact
+  (no Infisical CLI, no Infisical identity on the runner)
 ```
 
 ### Secrets inventory
@@ -62,18 +71,19 @@ nightly-sync.yml (schedule 17 5 * * * + workflow_dispatch)
 | `SUPABASE_URL` | dev, prod | `supabase_client.py` | Not secret |
 | `SUPABASE_SERVICE_ROLE_KEY` | dev, prod | `supabase_client.py` | Bypasses RLS; server-side only |
 | `APS_CLIENT_ID`, `APS_CLIENT_SECRET` | dev, prod | `aps_client.py` | APS app credentials |
-| `APS_REFRESH_TOKEN` | **prod only** | `InfisicalTokenStore` | Rotated by the runner on every run. Never in dev. |
-| `INFISICAL_UNIVERSAL_AUTH_CLIENT_ID`, `INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET` | prod (as repo secrets) | workflow → `InfisicalTokenStore` | The `datum-actions` identity. Pushed to GitHub by the sync like any other secret. |
+| `APS_REFRESH_TOKEN` | **not in Infisical** | `SupabaseTokenStore` | Lives in `public.runtime_state` in the datum Supabase project, rotated by the runner on every run. Seeded by `datum-aps-consent`. |
 
-Never stored: `PLEX_ALLOW_WRITES`, `PLEX_BASE_URL` (test-only override).
+All of the above live under the `/datum` folder of the Grace Engineering
+project. Never stored anywhere: `PLEX_ALLOW_WRITES`, `PLEX_BASE_URL` (test-only
+override), and no `INFISICAL_*` identity credentials reach the runner.
 
 ### Infisical-side setup (Shane, in the UI)
 
-1. Project `datum`; environments `dev`, `prod`.
-2. Import the inventory above into both envs (prod gets `APS_REFRESH_TOKEN` as an empty placeholder until consent seeding).
-3. Machine identity `datum-workstation-shane`: Universal Auth, role viewer on `dev`. Client id/secret saved to `~/.config/datum/infisical-identity.json` as `{"clientId": ..., "clientSecret": ...}`.
-4. Machine identity `datum-actions`: Universal Auth, read on `prod` `/`, write permitted on `prod` `/APS_REFRESH_TOKEN` only. Its client id/secret stored in `prod` under the two `INFISICAL_UNIVERSAL_AUTH_*` keys so the sync carries them to GitHub.
-5. GitHub secret sync `datum-secret-sync`: `prod` `/` → repository `grace-xwerks/datum`, auto-sync on, deletion protection on.
+1. In the existing **Grace Engineering** project, create folder `/datum` in both `dev` and `prod`.
+2. Add the inventory above (7 keys) to `/datum` in both envs. `APS_REFRESH_TOKEN` is **not** created anywhere in Infisical.
+3. Rename machine identity `plex-mcp-workstation-shane` → `grace-workstation-shane`; keep its existing viewer access and make sure it can read `/datum` in `dev` (project-level viewer already covers it). Reuse its existing client id/secret: copy `~/.config/plex-mcp/infisical-identity.json` to `~/.config/datum/infisical-identity.json` and add `"projectId": "8e04285d-bdf4-4836-b1d6-f2d026e1574a"` (or point `DATUM_INFISICAL_IDENTITY_FILE` at the plex-mcp file). No new identity.
+4. GitHub secret sync `datum-secret-sync`: source `prod` `/datum` → repository `grace-xwerks/datum`, auto-sync on, deletion protection on. Confirm the 7 keys appear under the repo's Actions secrets.
+5. Nothing else: no CI identity, no `INFISICAL_*` repo secrets.
 
 An agent produces this checklist with the exact key list; it never sees values.
 
@@ -93,6 +103,9 @@ Precedence, all via `os.environ.setdefault`: **shell env > Infisical > `.env.loc
   - Project id and environment come from `DATUM_INFISICAL_PROJECT_ID` and
     `DATUM_INFISICAL_ENV` (default `dev`); the project id is also read from the
     identity file (`"projectId"`) so local dev needs no extra env var.
+    **Amendment (B2):** the export is scoped to a folder, `DATUM_INFISICAL_PATH`
+    (default `/datum`), passed as `--path=` to `infisical export`, because
+    Datum's keys live in a folder of the shared Grace Engineering project.
   - Mints a short-lived token with `infisical login --method=universal-auth
     --plain --silent`, then `infisical export --format=json --silent
     --projectId=… --env=… --token=…`. Both subprocesses run with
@@ -113,7 +126,34 @@ Precedence, all via `os.environ.setdefault`: **shell env > Infisical > `.env.loc
 
 ### `aps_client.py` — pluggable `TokenStore`
 
-Today `TokenStore` is a JSON file. It becomes:
+> **Amendment (Agent B2).** The production backend is `SupabaseTokenStore`,
+> not `InfisicalTokenStore`. `InfisicalTokenStore` (merged in PR #25) stays in
+> the module, selectable with `APS_TOKEN_STORE=infisical`, but nothing uses it
+> by default and the workflow never sets it.
+>
+> `SupabaseTokenStore(key="aps_refresh_token")`:
+> - Backed by `public.runtime_state (key TEXT PRIMARY KEY, value TEXT NOT NULL,
+>   previous_value TEXT, updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+>   updated_by TEXT)` in the datum Supabase project, migration
+>   `db/migrations/0008_runtime_state.sql`. RLS enabled with **no policies**, so
+>   only the service-role key can read or write it; a comment on the table says
+>   why. Applied by the overlord via the Supabase MCP after the PR merges.
+> - Uses the existing `SupabaseClient` (`select` / `upsert`), so it needs only
+>   `SUPABASE_URL` + `SUPABASE_SERVICE_ROLE_KEY`, which the runner already has.
+> - `_load()` reads the row; missing or empty → `APSAuthError("… seed it with
+>   datum-aps-consent")`.
+> - `update(data)` sets in-memory fields, then upserts `value=<new>`,
+>   `previous_value=<old>`, `updated_by="datum-sync"` **before returning**; any
+>   failure → `APSAuthError("refresh token write-back failed: …")` and the
+>   in-memory access token is invalidated (same contract as the Infisical store).
+> - `clear()` is a no-op with a warning.
+> - Selection: `APS_TOKEN_STORE=file|supabase|infisical`, default `file`.
+>
+> `datum-aps-consent` gains `--store supabase|infisical` (default `supabase`)
+> and seeds the Supabase row through the same upsert path; the Infisical path is
+> kept for completeness.
+
+The pre-amendment design follows. Today `TokenStore` is a JSON file. It becomes:
 
 - `BaseTokenStore` with the current public surface (`access_token`,
   `refresh_token`, `expires_at`, `is_valid`, `update(data)`, `clear()`).
@@ -183,16 +223,15 @@ permissions: {contents: read}
 jobs.sync: ubuntu-latest, timeout-minutes 30
   - actions/checkout@v4 (persist-credentials: false)
   - actions/setup-python@v5 (3.12, pip cache on requirements*.txt)
-  - install Infisical CLI (official apt repo or release binary; pinned version)
-  - pip install -e .
+  - pip install -e .            # no Infisical CLI on the runner (amended)
   - Credentials present  # fail fast; names only, never values
       required: PLEX_API_KEY, SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY,
-                APS_CLIENT_ID, APS_CLIENT_SECRET,
-                INFISICAL_UNIVERSAL_AUTH_CLIENT_ID, INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET
+                APS_CLIENT_ID, APS_CLIENT_SECRET
+      optional: PLEX_API_SECRET, PLEX_TENANT_ID (code default is the Grace tenant)
   - Fusion → Supabase sync
-      env: the above + APS_TOKEN_STORE=infisical, DATUM_INFISICAL_PROJECT_ID,
-           DATUM_INFISICAL_ENV=prod, DATUM_DISABLE_INFISICAL=1 (bootstrap must
-           not also try to export; secrets are already in env), PYTHONUNBUFFERED=1
+      env: the above + APS_TOKEN_STORE=supabase,
+           DATUM_DISABLE_INFISICAL=1 (bootstrap must not try to export; secrets
+           are already in env), PYTHONUNBUFFERED=1
       run: datum-sync --log-file "$RUNNER_TEMP/sync.log" [--dry-run]
   - Tool-qty sync
       run: datum-sync-inventory --log-file "$RUNNER_TEMP/sync_inventory.log" [--dry-run]
@@ -202,7 +241,8 @@ jobs.sync: ubuntu-latest, timeout-minutes 30
 ```
 
 Secrets are scoped to the steps that use them. `PLEX_ALLOW_WRITES` never
-appears. Header comment documents the Infisical key → GitHub secret mapping,
+appears and no `INFISICAL_*` name exists in the workflow. Header comment
+documents the Infisical `/datum` key → GitHub secret mapping,
 the failure modes, and the manual re-run commands, in the style of plex_mcp's
 `sync-cache.yml`. The repo's `tests` workflow is unaffected.
 
@@ -213,11 +253,12 @@ the failure modes, and the manual re-run commands, in the style of plex_mcp's
 2. `datum-sync` starts; `bootstrap` sees `DATUM_DISABLE_INFISICAL=1` and loads
    nothing; shell env is the only source. `describe_sources()` logs each
    credential as `shell`.
-3. `APSClient` builds an `InfisicalTokenStore`, which reads
-   `prod/APS_REFRESH_TOKEN` via the `datum-actions` identity.
+3. `APSClient` builds a `SupabaseTokenStore`, which reads the
+   `aps_refresh_token` row from `public.runtime_state` with the service-role key.
 4. `_ensure_token()` → `refresh_access_token()` → Autodesk returns a new
-   access + refresh token → `update()` writes the new refresh token to
-   Infisical → only then does the hub traversal begin.
+   access + refresh token → `update()` upserts the new refresh token into the
+   row (old value kept in `previous_value`) → only then does the hub traversal
+   begin.
 5. Libraries download, validate, upsert into Supabase (unchanged).
    `libraries.ingested_at` and `source_modified_at` advance.
 6. `datum-sync-inventory` runs (no-op until tools are linked).
@@ -228,9 +269,9 @@ the failure modes, and the manual re-run commands, in the style of plex_mcp's
 | Failure | Behaviour |
 |---|---|
 | Repo secret missing | "Credentials present" step fails, names the secret, points at Infisical prod. Nothing else runs. |
-| Infisical identity rejected / CLI absent on runner | `InfisicalTokenStore._load()` raises `APSAuthError`; sync exits 2 with the Infisical stderr (ANSI-stripped) in the log. |
+| Supabase row missing / unreadable on runner | `SupabaseTokenStore._load()` raises `APSAuthError` naming the table and the `datum-aps-consent` remedy; sync exits 2. |
 | Refresh token rejected by Autodesk (dead after 15 idle days, or consumed elsewhere) | `APSAuthError` "refresh token rejected — re-seed with datum-aps-consent"; exit 2. |
-| Write-back to Infisical fails | `APSAuthError`; exit 2 **before** any API call uses the new token, so the old token in Infisical is at worst already-consumed and the log says exactly that. Human re-seeds. |
+| Write-back to Supabase fails | `APSAuthError`; exit 2 **before** any API call uses the new token, so the row at worst still holds the already-consumed previous token and the log says exactly that. Human re-seeds with `datum-aps-consent`. |
 | `validate_library` FAIL on a library | Unchanged: that library is skipped and counted as failed; exit 1; the failed names are in the summary. |
 | Supabase write error | Unchanged: per-library failure, exit 1. |
 | Scheduled run skipped by GitHub | Visible as a gap in `ingested_at`; Libraries page "Last sync" shows it. Off-the-hour cron reduces the chance. |
@@ -246,7 +287,11 @@ the failure modes, and the manual re-run commands, in the style of plex_mcp's
   behaviour (migrate existing `TokenStore` tests); `InfisicalTokenStore` loads
   the refresh token, writes back on `update()`, raises on write-back failure,
   never writes the token to argv, `clear()` is a no-op; selection via
-  `APS_TOKEN_STORE`; `APSClient(token_store=…)` injection.
+  `APS_TOKEN_STORE`; `APSClient(token_store=…)` injection. **B2 adds**
+  `SupabaseTokenStore`: load from row, missing row → `APSAuthError` naming the
+  remedy, write-back on `update()` with `previous_value` carried, write-back
+  failure raises before return and invalidates the access token, `clear()`
+  no-op, `APS_TOKEN_STORE=supabase` selection, `SupabaseClient` fully patched.
 - `tests/test_sync.py`: without `--local`, `APSAuthError` → exit 2 and no
   call to `sync_from_local`; with `--local`, APS is never constructed; startup
   logs the sources line.
@@ -276,8 +321,10 @@ the failure modes, and the manual re-run commands, in the style of plex_mcp's
    to `file`; `load_infisical()` is a no-op without an identity. The 440 tests
    plus new ones stay green. (Agents A–D.)
 2. Docs land. (Agent E.)
-3. Shane: Infisical project, identities, secret sync; run `datum-aps-consent`
-   once. Verify repo secrets appeared.
+3. Overlord applies `db/migrations/0008_runtime_state.sql` to the datum
+   Supabase project via the Supabase MCP. Shane: `/datum` folder + 7 keys in
+   Grace Engineering (both envs), identity rename, `datum-secret-sync`; verify
+   the repo secrets appeared; run `datum-aps-consent` once to seed the row.
 4. `workflow_dispatch` with `dry_run=true` → green. Then a real dispatch →
    `ingested_at` advances.
 5. First scheduled run green → Shane disables the two GRACE144 Task Scheduler
@@ -289,9 +336,10 @@ the failure modes, and the manual re-run commands, in the style of plex_mcp's
 | Agent | Scope | Files | Model | Depends on |
 |---|---|---|---|---|
 | A | `bootstrap.load_infisical`, `describe_sources`, tests, conftest guard | `bootstrap.py`, `tests/test_bootstrap.py`, `tests/conftest.py` | Opus | — |
-| B | `TokenStore` backends, `APSClient` injection, `datum-aps-consent`, tests | `aps_client.py`, `scripts/aps_consent.py`, `pyproject.toml`, `tests/test_aps_client.py`, `tests/test_aps_token_store.py`, `tests/test_aps_consent.py` | Opus | — |
-| C | `sync.py` fallback guard + sources log, tests | `sync.py`, `tests/test_sync.py` | Sonnet | A (for `describe_sources`), B (exception text) |
-| D | `nightly-sync.yml` | `.github/workflows/nightly-sync.yml` | Sonnet | B (env var names) |
+| B | `TokenStore` backends, `APSClient` injection, `datum-aps-consent`, tests | `aps_client.py`, `scripts/aps_consent.py`, `pyproject.toml`, `tests/test_aps_client.py`, `tests/test_aps_token_store.py`, `tests/test_aps_consent.py` | Opus | — (merged PR #25) |
+| B2 | `SupabaseTokenStore` + `APS_TOKEN_STORE=supabase`, `datum-aps-consent --store`, migration `0008_runtime_state.sql`, `DATUM_INFISICAL_PATH` in `bootstrap.load_infisical`, tests | `aps_client.py`, `scripts/aps_consent.py`, `bootstrap.py`, `db/migrations/0008_runtime_state.sql`, `tests/test_aps_token_store.py`, `tests/test_aps_consent.py`, `tests/test_bootstrap.py` | Opus | B |
+| C | `sync.py` fallback guard + sources log, `run_dev.py` Infisical precedence, `tenant_whoami` credential sources, tests | `sync.py`, `run_dev.py`, `plex_diagnostics.py`, tests | Sonnet | A, B (merged PR #26) |
+| D | `nightly-sync.yml` | `.github/workflows/nightly-sync.yml` | Sonnet | B2's env contract (`APS_TOKEN_STORE=supabase`; no Infisical on the runner) |
 | E | Docs | `CLAUDE.md`, `docs/BRIEFING.md`, `README.md`, `docs/SECRETS.md` | Sonnet | A–D merged |
 
 A and B run in parallel in separate worktrees. C and D start once A and B's

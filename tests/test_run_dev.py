@@ -153,3 +153,39 @@ class TestRunDevVsBootstrap:
         # run_dev.force_override is the DEV path: file wins
         force_override_from_env_local(f)
         assert os.environ["CRED"] == "from-file"
+
+
+# ─────────────────────────────────────────────
+# Three-source model: Infisical beats .env.local
+# ─────────────────────────────────────────────
+class TestInfisicalPrecedence:
+    def test_infisical_sourced_key_not_overridden(self, tmp_path, monkeypatch, capsys):
+        import bootstrap
+
+        f = tmp_path / ".env"
+        f.write_text("FOO=stale-from-file\nBAR=from-file\n")
+        monkeypatch.setenv("FOO", "from-infisical")
+        monkeypatch.delenv("BAR", raising=False)
+        monkeypatch.setitem(bootstrap._SOURCES, "FOO", bootstrap.SOURCE_INFISICAL)
+
+        changed = force_override_from_env_local(f)
+
+        assert os.environ["FOO"] == "from-infisical"
+        assert os.environ["BAR"] == "from-file"
+        assert changed == 1
+        out = capsys.readouterr().out
+        assert "FOO" in out
+        assert "infisical" in out.lower()
+        assert "from-infisical" not in out
+        assert "stale-from-file" not in out
+
+    def test_env_local_sourced_key_still_overridden(self, tmp_path, monkeypatch):
+        import bootstrap
+
+        f = tmp_path / ".env"
+        f.write_text("FOO=from-file\n")
+        monkeypatch.setenv("FOO", "from-shell")
+        monkeypatch.setitem(bootstrap._SOURCES, "FOO", bootstrap.SOURCE_ENV_LOCAL)
+
+        assert force_override_from_env_local(f) == 1
+        assert os.environ["FOO"] == "from-file"

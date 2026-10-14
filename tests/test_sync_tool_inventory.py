@@ -7,7 +7,7 @@ Focus on:
   - _unwrap_records(): handles bare-list and {data: [...]} envelopes
   - sync_tool_inventory(): writes qty_on_hand/qty_tracked/qty_synced_at,
     skips writes on --dry-run, logs failures without aborting the batch
-  - CLI exit codes: 0 success, 1 partial fail, 2 no linked tools
+  - CLI exit codes: 0 success or no linked tools (benign no-op), 1 partial fail, 2 config error
 
 All Plex + Supabase I/O is mocked.
 """
@@ -308,10 +308,13 @@ class TestCLI:
     @patch("sync_tool_inventory.SupabaseClient")
     @patch("sync_tool_inventory.PlexClient")
     @patch("sync_tool_inventory.sync_tool_inventory")
-    def test_exit_2_on_no_linked_tools(self, mock_sync, mock_plex, mock_sb):
+    def test_exit_0_on_no_linked_tools(self, mock_sync, mock_plex, mock_sb):
+        # No tool has a plex_supply_item_id until the Plex writeback (#1)
+        # ships. The nightly workflow runs this step every night, so an
+        # empty run is a benign no-op (exit 0 with a warning), not a failure.
         from sync_tool_inventory import SyncReport
         mock_sync.return_value = SyncReport(end_time=1.0)
-        assert main([]) == 2
+        assert main([]) == 0
 
     @patch("sync_tool_inventory.SupabaseClient")
     @patch("sync_tool_inventory.PlexClient", side_effect=RuntimeError("no key"))

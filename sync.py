@@ -72,13 +72,20 @@ from sync_supabase import sync_library, hash_file  # noqa: E402
 from tool_library_loader import load_all_libraries, CAM_TOOLS_DIR  # noqa: E402
 from enrich import enrich_raw_tools  # noqa: E402
 from populate_supply_items import populate_supply_items  # noqa: E402
-from validate_library import validate_library, ValidationMode  # noqa: E402
+from validate_library import validate_library, ValidationMode, ValidationStage  # noqa: E402
 
 log = logging.getLogger("datum.sync")
 
 # Known XWERKS hub IDs (see memory: project_aps_cloud_integration.md)
 PROJECT_ID = "a.YnVzaW5lc3M6Z3JhY2Vlbmc0I0QyMDI0MTIyMDg0OTIxNzc3Ng"
 CAM_TOOLS_FOLDER = "urn:adsk.wipprod:fs.folder:co.C0zYkNP4TOexre_-hWRhRA"
+
+# This job writes to Supabase (dedup key: fusion_guid), not Plex. Validate at
+# the STAGING stage so a missing/empty product-id or description, or a
+# duplicate product-id, is a WARN instead of failing the whole library. The
+# Plex stage (populate_supply_items) already skips tools with no product_id.
+# See docs/validate_library_spec.md "Stages".
+VALIDATION_STAGE = ValidationStage.STAGING
 
 
 # ─────────────────────────────────────────────
@@ -221,6 +228,7 @@ def sync_from_aps(*, dry_run: bool = False) -> SyncReport:
             library_name=library_name,
             mode=ValidationMode.PRODUCTION,
             use_api=False,
+            stage=VALIDATION_STAGE,
         )
         if not vr.passed:
             report.results.append(LibraryResult(
@@ -315,6 +323,7 @@ def sync_from_local(*, dry_run: bool = False) -> SyncReport:
             library_name=library_name,
             mode=ValidationMode.PRODUCTION,
             use_api=False,
+            stage=VALIDATION_STAGE,
         )
         if not vr.passed:
             report.results.append(LibraryResult(
@@ -408,6 +417,7 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     log.info("Datum sync starting%s", " (dry-run)" if args.dry_run else "")
+    log.info("validation stage: %s", VALIDATION_STAGE.value)
     log.info("Credential sources:\n%s", bootstrap.format_sources())
 
     report: SyncReport | None = None

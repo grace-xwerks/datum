@@ -447,3 +447,93 @@ class TestPostSyncHook:
 
         # Should still return 0 despite staging failure
         assert main([]) == 0
+
+
+# ─────────────────────────────────────────────
+# Validation stage — sync.py validates for Supabase, not Plex (2026-10-14)
+# ─────────────────────────────────────────────
+class TestValidationStage:
+    def test_module_constant_is_staging(self):
+        import sync
+        from validate_library import ValidationStage
+        assert sync.VALIDATION_STAGE is ValidationStage.STAGING
+
+    @patch("sync.SupabaseClient")
+    @patch("sync.sync_library")
+    @patch("sync.validate_library")
+    @patch("sync.APSClient")
+    def test_aps_path_validates_at_staging(self, MockAPS, mock_validate, mock_sync, MockSB):
+        from validate_library import ValidationStage
+        aps = MockAPS.return_value
+        aps.get_folder_contents.return_value = _make_folder_contents("LIB_A", "LIB_B")
+        aps.get_item_tip.return_value = _make_tip()
+        aps.download_tool_library.return_value = [{"guid": "g1", "type": "drill"}]
+        mock_validate.return_value = _passing_validation("LIB_A")
+        mock_sync.return_value = {"tools": 1, "presets": 0}
+
+        sync_from_aps(dry_run=False)
+
+        assert mock_validate.call_count == 2
+        for call in mock_validate.call_args_list:
+            assert call.kwargs["stage"] is ValidationStage.STAGING
+
+    @patch("sync.validate_library")
+    @patch("sync.load_all_libraries")
+    def test_local_path_validates_at_staging(self, mock_load, mock_validate):
+        from validate_library import ValidationStage
+        mock_cam = MagicMock()
+        mock_cam.exists.return_value = True
+        mock_load.return_value = {"LIB_A": [{"guid": "g1"}], "LIB_B": [{"guid": "g2"}]}
+        mock_validate.return_value = _passing_validation("LIB_A")
+
+        with patch("sync.CAM_TOOLS_DIR", mock_cam), patch("sync.SupabaseClient"):
+            sync_from_local(dry_run=True)
+
+        assert mock_validate.call_count == 2
+        for call in mock_validate.call_args_list:
+            assert call.kwargs["stage"] is ValidationStage.STAGING
+
+    @patch("sync.APSClient")
+    @patch("sync.SupabaseClient")
+    def test_real_validator_passes_supabase_shaped_library(self, MockSB, MockAPS):
+        """End-to-end through the real validator: a library with no
+        product-id, a blank description and a duplicate product-id now
+        validates (WARNs only) instead of failing the nightly run."""
+        base = {
+            "type": "flat end mill",
+            "vendor": "Harvey Tool",
+            "geometry": {"DC": 0.25, "OAL": 2.5, "NOF": 4},
+            "post-process": {"number": 1},
+        }
+        tools = [
+            {**base, "guid": "g1", "description": ""},
+            {**base, "guid": "g2", "description": "A", "product-id": "P1"},
+            {**base, "guid": "g3", "description": "B", "product-id": "P1"},
+        ]
+        aps = MockAPS.return_value
+        aps.get_folder_contents.return_value = _make_folder_contents("LIB_A")
+        aps.get_item_tip.return_value = _make_tip()
+        aps.download_tool_library.return_value = tools
+
+        with patch("sync.enrich_raw_tools", return_value={"enriched": 0}):
+            report = sync_from_aps(dry_run=True)
+
+        assert [r.status for r in report.results] == ["success"]
+        assert report.results[0].tools == 3
+
+    @patch("sync.populate_supply_items")
+    @patch("sync.SupabaseClient")
+    @patch("sync.sync_from_aps")
+    def test_main_logs_stage_once(self, mock_aps, _sb, _pop, caplog):
+        report = SyncReport(source="aps", start_time=0, end_time=1)
+        report.results = [LibraryResult("A", "success", tools=5)]
+        mock_aps.return_value = report
+
+        with caplog.at_level(logging.INFO, logger="datum.sync"):
+            assert main(["--dry-run"]) == 0
+
+        hits = [
+            r for r in caplog.records
+            if "validation stage: staging" in r.getMessage()
+        ]
+        assert len(hits) == 1

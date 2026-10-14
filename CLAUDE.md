@@ -82,9 +82,10 @@ gh pr merge <number> --auto --squash
 
 > **Repo location.** This repo lives at `grace-xwerks/datum` (migrated from
 > the retired `grace-shane/Datum`; issue numbers changed — see the legend in
-> `TODO.md`). On a fresh clone `gh` defaults to the stale `upstream` remote,
-> so run `gh repo set-default grace-xwerks/datum` once, or pass
-> `--repo grace-xwerks/datum`. Local setup: `py -m venv .venv`, then
+> `TODO.md`). The repo left the `just-shane/plex-api` fork network on
+> 2026-10-14, so `origin` is the only remote a fresh clone needs; if an old
+> clone still has an `upstream` remote, `git remote remove upstream`. Local
+> setup: `py -m venv .venv`, then
 > `.venv\Scripts\python -m pip install -r requirements-dev.txt`.
 
 ## Things this repo does NOT have

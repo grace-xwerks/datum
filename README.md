@@ -150,5 +150,5 @@ protect against accidental writes:
 
 ## License
 
-Internal Grace Engineering project. Forked from
-[`just-shane/plex-api`](https://github.com/just-shane/plex-api).
+Internal Grace Engineering project. Originated as a fork of
+`just-shane/plex-api`; standalone since 2026-10-14.

@@ -31,7 +31,9 @@ them and pushes tooling data to Plex via REST API every night at midnight.
 
 ## Repo: https://github.com/grace-xwerks/datum
 
-Forked from just-shane/plex-api. Grace Engineering's working copy.
+Grace Engineering's canonical repository. Originated as a fork of
+`just-shane/plex-api` (Shane's personal account); **left that fork network on
+2026-10-14** and is now a standalone repo. Nothing merges back upstream.
 
 Renamed from `plex-api` → `datum` on 2026-04-09.
 
@@ -41,8 +43,10 @@ came across intact, but **issue numbers changed** and closed issues were not
 migrated. Legacy → current: #3→#1, #4→#2, #5→#3, #6→#4, #7→#5, #8→#6,
 #85→#7, #98–#104→#8–#14. Unlinked `#N` / `PR #N` references in this file
 (including the session log) use the **legacy** numbering; the PR numbers match
-the squash-commit subjects in `git log`. `gh` defaults to the `upstream`
-remote on a fresh clone — run `gh repo set-default grace-xwerks/datum`.
+the squash-commit subjects in `git log`. Old clones may still carry an
+`upstream` remote pointing at `just-shane/plex-api`; remove it
+(`git remote remove upstream`) — it was what made `gh` pick the wrong default
+repo before the fork detach.
 
 ---
 
@@ -106,7 +110,7 @@ legacy PR #97; `master` has only gained `.gitattributes` since).
 |---|---|
 | **Supabase `datum` project** | Verified via the Supabase MCP (re-bound to the Grace org). Healthy, Postgres 17, 15 migrations applied (latest three dated 2026-10-13: `item_suppliers`, `approved_suppliers`, `supply_items_widen`). `public`: `libraries` 7, `tools` 155, `cutting_presets` 631, `reference_catalog` 85,306, `holder_catalog` 405, `plex_supply_items` 0. `plex` mirror: all 12 master tables refreshed 2026-10-14 13:25 UTC; production-history tables run daily at 06:00 UTC via pg_cron → edge function, last OK 2026-10-14. The "last ran 2026-08-18" note above is superseded. |
 | **Nightly Fusion → Supabase sync** | **Dead since 2026-04-10.** Every `libraries.ingested_at` equals 2026-04-10 15:26 UTC and `source_modified_at` is NULL everywhere, so the GRACE144 "Datum Nightly Sync" task has not written since the day it was deployed. No tools are linked to Plex and `qty_synced_at` is NULL throughout. Tracked in [#18](https://github.com/grace-xwerks/datum/issues/18). |
-| **GitHub Actions** | **Root cause found.** The repo was created on 2026-05-01 as a *fork* of `just-shane/plex-api`, and GitHub disables workflows on forks until a repo admin clicks "enable" on the Actions tab. Not an org policy: repo-level Actions was already enabled with all actions allowed, the `tests` workflow was `active`, and the repo is public (unlimited minutes). Shane enabled the workflows on 2026-10-14; PR #20 (new-repo numbering) was the first run (pull_request 20s, push 15s, both green). **Then set the same day:** branch protection on `master` requiring the `pytest` context (strict=false, no reviews, enforce_admins=false, no force-push/deletion) and repo `allow_auto_merge=true`. Still open: consider "Leave fork network" so `gh` stops defaulting to the stale `upstream` remote. |
+| **GitHub Actions** | **Root cause found.** The repo was created on 2026-05-01 as a *fork* of `just-shane/plex-api`, and GitHub disables workflows on forks until a repo admin clicks "enable" on the Actions tab. Not an org policy: repo-level Actions was already enabled with all actions allowed, the `tests` workflow was `active`, and the repo is public (unlimited minutes). Shane enabled the workflows on 2026-10-14; PR #20 (new-repo numbering) was the first run (pull_request 20s, push 15s, both green). **Then set the same day:** branch protection on `master` requiring the `pytest` context (strict=false, no reviews, enforce_admins=false, no force-push/deletion) and repo `allow_auto_merge=true`. Shane then left the fork network the same day; the `upstream` remote was removed from the local clone and the `gh repo set-default` warnings dropped from CLAUDE.md / BRIEFING. |
 | **GCP migration (#7)** | **Abandoned.** Project `datum-prod-493615` has billing disabled, its VMs are gone, and neither of Shane's Google accounts has IAM on it; deletion requested of a Grace admin 2026-10-14. `scripts/gcp/` and `docs/NEXT_SESSION.md` removed. See the banner in `docs/GCP_MIGRATION.md`. |
 | **Issues opened** | [#16](https://github.com/grace-xwerks/datum/issues/16) Infisical secrets, [#17](https://github.com/grace-xwerks/datum/issues/17) port holder-catalog work from `claude/awesome-ishizaka`, [#18](https://github.com/grace-xwerks/datum/issues/18) nightly sync → GitHub Actions. |
 

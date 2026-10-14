@@ -12,6 +12,8 @@ G5, where we have read access only.
 
 from typing import Any
 
+import bootstrap
+
 # ─────────────────────────────────────────────
 # Known tenants
 # Tenant IDs are not secrets — committing them is fine. These labels are
@@ -87,7 +89,12 @@ def tenant_whoami(client, configured_tenant_id: str = "") -> dict:
                                        "other" | "no_data" |
                                        "auth_failed" | "request_failed",
             "summary":                 "<one-line human-readable status>",
+            "credential_sources":      [{name, source, prefix, length}, ...],
         }
+
+    ``credential_sources`` reports where each credential came from (shell,
+    infisical, .env.local, unset) via ``bootstrap.describe_sources()``. It
+    never carries more than an 8-character prefix of any value.
     """
     report: dict = {
         "configured_tenant_id":    configured_tenant_id or "",
@@ -98,6 +105,10 @@ def tenant_whoami(client, configured_tenant_id: str = "") -> dict:
         "get_tenant_raw":          None,
         "match":                   "no_data",
         "summary":                 "",
+        "credential_sources": [
+            {"name": n, "source": src, "prefix": pre, "length": ln}
+            for n, src, pre, ln in bootstrap.describe_sources()
+        ],
     }
 
     # ── Step 1: list_tenants via get_envelope so HTTP errors surface ────

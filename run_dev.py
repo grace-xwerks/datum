@@ -31,6 +31,8 @@ import os
 import sys
 from pathlib import Path
 
+import bootstrap
+
 # Force stdout to UTF-8 before importing app — same reason as in app.py:
 # Windows cp1252 console can't encode em-dashes / arrows / etc., and a
 # print() failure mid-Flask-request turns into a 500.
@@ -48,6 +50,12 @@ def force_override_from_env_local(path: Path | str | None = None) -> int:
     Read .env.local and write each KEY=VALUE pair into os.environ via
     direct assignment (NOT setdefault). Existing shell env vars with
     the same name are OVERRIDDEN.
+
+    Exception: a key that ``bootstrap.load_infisical()`` loaded
+    (``bootstrap._SOURCES[key] == SOURCE_INFISICAL``) is SKIPPED. Under the
+    three-source model (shell > Infisical > .env.local) a stale .env.local
+    must never beat an Infisical value. Skipped key names are printed
+    (never their values).
 
     Parameters
     ----------
@@ -70,6 +78,7 @@ def force_override_from_env_local(path: Path | str | None = None) -> int:
         return 0
 
     changed = 0
+    skipped: list[str] = []
     for line in path.read_text(encoding="utf-8").splitlines():
         line = line.strip()
         if not line or line.startswith("#") or "=" not in line:
@@ -86,10 +95,22 @@ def force_override_from_env_local(path: Path | str | None = None) -> int:
         if not key:
             continue
 
+        # Infisical is the source of truth for anything it loaded.
+        if bootstrap._SOURCES.get(key) == bootstrap.SOURCE_INFISICAL:
+            skipped.append(key)
+            continue
+
         # Direct assignment — OVERRIDE the shell value if it exists
         if os.environ.get(key) != value:
             os.environ[key] = value
             changed += 1
+
+    if skipped:
+        print(
+            f"[run_dev] Skipped {len(skipped)} key(s) from .env.local because "
+            f"Infisical already supplied them (Infisical wins over .env.local): "
+            f"{', '.join(skipped)}"
+        )
 
     return changed
 

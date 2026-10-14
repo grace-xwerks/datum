@@ -1,13 +1,19 @@
 #!/usr/bin/env python
 """
 sync.py
-Nightly sync CLI — APS cloud-first, local ADC fallback
+Nightly sync CLI — APS is the only source (no silent fallback)
 Grace Engineering — Datum project
 =============================================================
 Downloads Fusion 360 tool libraries from the Autodesk cloud
 (APS Data Management API) and upserts them into Supabase.
-Falls back to local ADC-synced files when APS OAuth is
-unavailable.
+
+Without ``--local``, APS is the ONLY source. If APS is not
+configured or authentication fails, the run exits 2 with a
+single CRITICAL log line naming the cause -- it never falls back
+to the local ADC-synced files, because a nightly job that quietly
+syncs a stale local copy hides a dead refresh token. ``--local``
+is an explicit, operator-requested mode (with its own stale-file
+guard) and is the only way the local loader runs.
 
 Usage
 -----
@@ -17,7 +23,7 @@ Usage
     # Dry run — download + validate only, no Supabase writes
     py sync.py --dry-run
 
-    # Force local ADC fallback (skip APS entirely)
+    # Explicit local ADC mode (skip APS entirely; never automatic)
     py sync.py --local
 
     # Verbose logging
@@ -27,7 +33,8 @@ Exit codes
 ----------
     0  All libraries synced (or validated, in dry-run mode)
     1  One or more libraries failed validation or sync
-    2  Fatal error (no source available, config missing, etc.)
+    2  Fatal error (APS config/auth failure, APS error, local load
+       failure, or no libraries processed)
 
 Scheduling
 ----------
@@ -372,7 +379,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--local",
         action="store_true",
-        help="Force local ADC fallback (skip APS cloud)",
+        help="Use local ADC-synced files instead of APS (explicit; never automatic)",
     )
     parser.add_argument(
         "-v", "--verbose",
@@ -401,26 +408,30 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     log.info("Datum sync starting%s", " (dry-run)" if args.dry_run else "")
+    log.info("Credential sources:\n%s", bootstrap.format_sources())
 
     report: SyncReport | None = None
 
-    if not args.local:
-        # Try APS cloud first
-        try:
-            log.info("Attempting APS cloud sync...")
-            report = sync_from_aps(dry_run=args.dry_run)
-        except (APSConfigError, APSAuthError) as e:
-            log.warning("APS unavailable: %s — falling back to local", e)
-        except Exception as e:
-            log.warning("APS error: %s — falling back to local", e)
-
-    if report is None:
-        # Fallback to local ADC
-        log.info("Using local ADC path...")
+    if args.local:
+        log.info("Using local ADC path (--local)...")
         try:
             report = sync_from_local(dry_run=args.dry_run)
         except Exception as e:
             log.critical("Local sync failed: %s", e)
+            return 2
+    else:
+        # APS is the only source: any failure here is fatal, never a fallback.
+        try:
+            log.info("Attempting APS cloud sync...")
+            report = sync_from_aps(dry_run=args.dry_run)
+        except APSConfigError as e:
+            log.critical("APS sync failed (config error): %s", e)
+            return 2
+        except APSAuthError as e:
+            log.critical("APS sync failed (auth error): %s", e)
+            return 2
+        except Exception as e:
+            log.critical("APS sync failed: %s", e)
             return 2
 
     report.print_summary()

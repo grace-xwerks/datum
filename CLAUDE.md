@@ -53,14 +53,16 @@ repository. **Read these files in this order before doing anything**:
 - **Never bypass the production write guard.** Mutating HTTP methods on
   `connect.plex.com` are refused at `/api/plex/raw` unless
   `PLEX_ALLOW_WRITES=1` is explicitly set in the environment.
-- **Always run `pytest` before committing.** Intended policy: branch
-  protection on master requires the `pytest` GitHub Actions check before any
-  merge. As of 2026-10-13 that is **not enforced** — Actions does not run on
-  this repo yet and no protection rule exists (see `docs/BRIEFING.md`
-  status snapshot), so the local run is the only gate.
+- **Always run `pytest` before committing.** Branch protection on master
+  requires the `pytest` GitHub Actions check before any merge — **enforced
+  as of 2026-10-14** (admins are not exempt from the check but can bypass in
+  an emergency; force-pushes and branch deletion are blocked). The repo was
+  a fork, which silently disabled Actions until 2026-10-14; see the
+  `docs/BRIEFING.md` 2026-10-14 status snapshot. The local run is still
+  expected before every push — CI is the backstop, not the first line.
 - **Use the `claude/<short-name>` branch naming convention** for new
-  branches off master, then merge with `gh pr merge --squash` (use `--auto`
-  only once repo auto-merge and a working required check are in place).
+  branches off master, then merge with `gh pr merge --auto --squash`. Repo
+  auto-merge is enabled (2026-10-14); the PR lands once `pytest` passes.
 - **Never ship the Supabase service role key to a browser.** It bypasses
   RLS. Server-side ingest scripts only.
 

@@ -192,6 +192,31 @@ class TestReportStructure:
         ):
             assert key in report
 
+    def test_report_has_credential_sources(self, fake_client):
+        fake_client.set_response("tenants", [{"id": G5_TENANT_ID}])
+        report = tenant_whoami(fake_client, G5_TENANT_ID)
+        rows = report["credential_sources"]
+        assert isinstance(rows, list) and rows
+        for row in rows:
+            assert set(row) == {"name", "source", "prefix", "length"}
+            assert len(row["prefix"]) <= 8
+
+    def test_credential_sources_never_leak_full_value(self, fake_client, monkeypatch):
+        secret = "SUPERSECRETVALUE-1234567890"
+        monkeypatch.setenv("PLEX_API_SECRET", secret)
+        fake_client.set_response("tenants", [{"id": G5_TENANT_ID}])
+        report = tenant_whoami(fake_client, G5_TENANT_ID)
+        row = next(r for r in report["credential_sources"] if r["name"] == "PLEX_API_SECRET")
+        assert row["prefix"] == secret[:8]
+        assert row["length"] == len(secret)
+        assert secret not in str(report["credential_sources"])
+
+    def test_credential_sources_present_on_auth_failure(self, fake_client):
+        fake_client.set_envelope("tenants", _err_envelope(401, "Unauthorized", "bad key"))
+        report = tenant_whoami(fake_client, "")
+        assert report["match"] == "auth_failed"
+        assert report["credential_sources"]
+
     def test_report_records_configured_label(self, fake_client):
         fake_client.set_response("tenants", [{"id": G5_TENANT_ID}])
         report = tenant_whoami(fake_client, G5_TENANT_ID)

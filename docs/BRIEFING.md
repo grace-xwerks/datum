@@ -100,6 +100,15 @@ legacy PR #97; `master` has only gained `.gitattributes` since).
 | **Unmerged work on stale branches** | `claude/awesome-ishizaka`: `scripts/ingest_holders.py` and Scripts-page holder matching — the `holder_catalog` table has **no migration** in `db/migrations/` and no code on `master`. Other `claude/*` and `wip/*` branches are merged or superseded. |
 | **Not verified** | The live Supabase `datum` project (`crimblieyypiyarssoel`) — the Supabase MCP in use was bound to a different org. GRACE144 Task Scheduler runs. |
 
+### Status snapshot — 2026-10-14
+
+| Area | State |
+|---|---|
+| **Supabase `datum` project** | Verified via the Supabase MCP (re-bound to the Grace org). Healthy, Postgres 17, 15 migrations applied (latest three dated 2026-10-13: `item_suppliers`, `approved_suppliers`, `supply_items_widen`). `public`: `libraries` 7, `tools` 155, `cutting_presets` 631, `reference_catalog` 85,306, `holder_catalog` 405, `plex_supply_items` 0. `plex` mirror: all 12 master tables refreshed 2026-10-14 13:25 UTC; production-history tables run daily at 06:00 UTC via pg_cron → edge function, last OK 2026-10-14. The "last ran 2026-08-18" note above is superseded. |
+| **Nightly Fusion → Supabase sync** | **Dead since 2026-04-10.** Every `libraries.ingested_at` equals 2026-04-10 15:26 UTC and `source_modified_at` is NULL everywhere, so the GRACE144 "Datum Nightly Sync" task has not written since the day it was deployed. No tools are linked to Plex and `qty_synced_at` is NULL throughout. Tracked in [#18](https://github.com/grace-xwerks/datum/issues/18). |
+| **GCP migration (#7)** | **Abandoned.** Project `datum-prod-493615` has billing disabled, its VMs are gone, and neither of Shane's Google accounts has IAM on it; deletion requested of a Grace admin 2026-10-14. `scripts/gcp/` and `docs/NEXT_SESSION.md` removed. See the banner in `docs/GCP_MIGRATION.md`. |
+| **Issues opened** | [#16](https://github.com/grace-xwerks/datum/issues/16) Infisical secrets, [#17](https://github.com/grace-xwerks/datum/issues/17) port holder-catalog work from `claude/awesome-ishizaka`, [#18](https://github.com/grace-xwerks/datum/issues/18) nightly sync → GitHub Actions. |
+
 ---
 
 ## Auth — header model
@@ -155,7 +164,7 @@ Fusion 360 tool libraries
          └── production/v1/production-definitions/workcenters  machine setup docs (per-id write — blocked on Classic API, #6)
 ```
 
-The nightly sync runs via the `sync.py` CLI (PR #44), scheduled on an always-on host (PR #47). Going forward, the GCP migration ([#7](https://github.com/grace-xwerks/datum/issues/7) (legacy #85)) will drop the ADC fallback entirely, replace Supabase with Cloud SQL, and move scheduling to Cloud Scheduler — see `docs/GCP_MIGRATION.md`.
+The nightly sync runs via the `sync.py` CLI (PR #44), scheduled on GRACE144 Task Scheduler (PR #47) — **but it has not written since 2026-04-10** (see the 2026-10-14 status snapshot). [#18](https://github.com/grace-xwerks/datum/issues/18) moves it to GitHub Actions and drops the ADC fallback; [#16](https://github.com/grace-xwerks/datum/issues/16) moves secrets to Infisical. The GCP migration (#7) was **abandoned on 2026-10-14** — `docs/GCP_MIGRATION.md` is a historical record only. Supabase stays.
 
 ### Industry hierarchy (Plex data model)
 
@@ -373,7 +382,7 @@ Sync filter: include only `type != "holder" AND type != "probe"`
 - Stale file guard — aborts if files older than 25h (ADC sync stall detection)
 - `PermissionError` and `JSONDecodeError` handling (ADC mid-sync file locks)
 - `report_library_contents()` — diagnostic summary
-- **Status:** local-ADC path only. `aps_client.py` is the primary source today; this loader is the fallback. Scheduled for removal under the GCP migration epic (#85).
+- **Status:** local-ADC path only. `aps_client.py` is the primary source today; this loader is the fallback. Scheduled for removal under the GitHub Actions sync migration ([#18](https://github.com/grace-xwerks/datum/issues/18)); the GCP epic that previously owned this was abandoned 2026-10-14.
 
 ### aps_client.py (PR #43)
 - OAuth client for Autodesk Platform Services (Fusion Hub online)
@@ -391,7 +400,7 @@ Sync filter: include only `type != "holder" AND type != "probe"`
 - `SUPABASE_URL` + `SUPABASE_SERVICE_ROLE_KEY` in `.env.local` — server-side only, never shipped to the browser
 - Full tool record (geometry, holders, pockets) lives here; Plex gets the identity slice via `build_supply_item_payload` (#3)
 - PR #34 dropped the `fusion2plex_` table prefix once DB isolation made it redundant
-- Scheduled for replacement by Cloud SQL under the GCP migration epic (#85)
+- Was scheduled for replacement by Cloud SQL under the GCP migration epic (#85); that epic was **abandoned 2026-10-14** and Supabase is the permanent staging/cache store
 
 ### enrich.py (PR #48, wired in the sync pipeline via PR #54)
 - Vendor reference catalog + geometry-based tool enrichment
@@ -476,8 +485,11 @@ https://github.com/grace-xwerks/datum/issues for live status.
    Dry-run by default. Calls validate_library gate before every run.
 4. Error handling + logging on run failures — issue #8. `--log-file`
    scaffold landed in PR #46; issue remains open for broader error paths.
-5. GCP migration (umbrella [#7](https://github.com/grace-xwerks/datum/issues/7) (legacy #85))
-   — see `docs/GCP_MIGRATION.md` for scope, affected code, and sequence.
+5. ~~GCP migration (umbrella #7, legacy #85)~~ — **abandoned 2026-10-14**;
+   see the banner at the top of `docs/GCP_MIGRATION.md`. Replaced by
+   [#16](https://github.com/grace-xwerks/datum/issues/16) (Infisical secrets) and
+   [#18](https://github.com/grace-xwerks/datum/issues/18) (nightly sync on
+   GitHub Actions).
 
 ### Blocked on Plex Classic Web Services access
 
@@ -654,6 +666,28 @@ is being used. We should also probably make `bootstrap.py` log when
 ## Session log
 
 Reverse chronological. Each entry: what was the goal, what landed, what's left.
+
+### 2026-10-14 — Supabase verified, nightly sync found dead, GCP cutover abandoned
+
+**Goal:** Re-orient after the 2026-10-13 docs sweep, verify the Supabase side
+now that the MCP is bound to the right org, and decide what to do about the
+half-provisioned GCP migration.
+
+**Done:**
+
+- Supabase `datum` project verified live (see the 2026-10-14 status snapshot).
+  Found the Fusion → Supabase nightly sync has not written since 2026-04-10.
+- Opened [#16](https://github.com/grace-xwerks/datum/issues/16) (Infisical),
+  [#17](https://github.com/grace-xwerks/datum/issues/17) (holder-catalog port),
+  [#18](https://github.com/grace-xwerks/datum/issues/18) (sync → GitHub Actions).
+- Investigated the GCP cutover: provisioned 2026-04-17, migration never started,
+  billing lapsed, project unreachable from Shane's accounts. Decision: abandon.
+  Closed #7, removed `scripts/gcp/` + `docs/NEXT_SESSION.md`, banner on
+  `docs/GCP_MIGRATION.md`, reframed `docs/REORG_AND_STACK.md`, trimmed the
+  GCP steps out of #14.
+
+**What's left:** #18 is the most urgent (the sync is dead). #16 before #18's
+secrets step. Actions still produces no runs on this repo — org admin needed.
 
 ### 2026-04-09 — Postman buildout + connectivity sweep + supply-item cross-ref finding
 

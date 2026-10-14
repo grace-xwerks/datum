@@ -4,11 +4,12 @@
 #   `datum-sync` mirrors the Fusion 360 tool libraries (read from Autodesk APS)
 #   into the Supabase `libraries` / `tools` / `cutting_presets` tables;
 #   `datum-sync-inventory` then reconciles tool quantities. Both used to run
-#   from two Windows Task Scheduler jobs on GRACE144, which have been silently
-#   dead since 2026-04-10: nobody noticed for six months because a failure only
-#   ever landed in a local log file. This workflow is the scheduler now. A
-#   failed run is red in the Actions tab and emails whoever last edited the
-#   cron line below.
+#   from two Windows Task Scheduler jobs on GRACE144, and nothing they wrote
+#   ever reached Supabase after 2026-04-10: the validation gate failed every
+#   library on missing product-ids (fixed by the STAGING stage, PR #32) and the
+#   failures only ever landed in a local log file, so nobody noticed for six
+#   months. This workflow is the scheduler now. A failed run is red in the
+#   Actions tab and emails whoever last edited the cron line below.
 #
 #   The cron is 17 5 * * * (05:17 UTC = 00:17 America/Chicago in CDT, 23:17 the
 #   previous evening in CST). It sits off the top of the hour on purpose:
@@ -178,8 +179,8 @@ jobs:
 
       - name: Tool-qty sync
         # Runs only if the sync step succeeded (default step condition). A
-        # no-op until tools are linked, but it is the second GRACE144 job and
-        # dies with the first.
+        # benign no-op (warning, exit 0) until the Plex writeback (#1) links
+        # tools; it was the second GRACE144 job and is retired with the first.
         env:
           PLEX_API_KEY: ${{ secrets.PLEX_API_KEY }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}

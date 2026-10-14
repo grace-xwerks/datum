@@ -126,8 +126,9 @@ The original plan to write to `mdm/v1/parts` and `tooling/v1/tool-assemblies` wa
 ## Deployment and operations
 
 The **nightly sync runs on GitHub Actions**, not on a local machine. It replaces the two
-GRACE144 Windows Task Scheduler jobs, which stopped writing on 2026-04-10 and are being
-retired ([#18](https://github.com/grace-xwerks/datum/issues/18)).
+GRACE144 Windows Task Scheduler jobs, which never got a library past the validation gate
+after 2026-04-10 and are being retired ([#18](https://github.com/grace-xwerks/datum/issues/18));
+the first live Actions run succeeded on 2026-10-14.
 
 - **Workflow:** `.github/workflows/nightly-sync.yml`. Cron `17 5 * * *` UTC (00:17
   America/Chicago in CDT). It runs `datum-sync` (Fusion tool libraries from Autodesk APS into

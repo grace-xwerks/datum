@@ -578,3 +578,303 @@ class TestLoaderIntegration:
         result = load_library(f)  # no validate kwarg
         assert result is not None
         assert len(result) == 1
+
+
+
+# ─────────────────────────────────────────────
+# Validation stages (PLEX vs STAGING) — 2026-10-14
+# ─────────────────────────────────────────────
+
+STAGING_NOTE = "staging: warn only"
+
+
+def _issues(result, rule, field=None):
+    return [
+        i for i in result.issues
+        if i.rule == rule and (field is None or i.field == field)
+    ]
+
+
+class TestValidationStageEnum:
+    def test_values(self):
+        from validate_library import ValidationStage
+        assert ValidationStage.PLEX.value == "plex"
+        assert ValidationStage.STAGING.value == "staging"
+        # str-valued so it round-trips through argparse / JSON
+        assert ValidationStage("staging") is ValidationStage.STAGING
+
+    def test_default_stage_is_plex(self):
+        import inspect
+        from validate_library import ValidationStage
+        sig = inspect.signature(validate_library)
+        assert sig.parameters["stage"].default is ValidationStage.PLEX
+        result = validate_library(tools=[make_tool()], library_name="t")
+        assert result.stage is ValidationStage.PLEX
+
+    def test_string_stage_is_coerced(self):
+        from validate_library import ValidationStage
+        tool = make_tool()
+        del tool["product-id"]
+        result = validate_library(
+            tools=[tool], library_name="t", stage="staging",
+        )
+        assert result.stage is ValidationStage.STAGING
+        assert result.passed is True
+
+    def test_unknown_stage_raises(self):
+        with pytest.raises(ValueError):
+            validate_library(tools=[make_tool()], library_name="t", stage="bogus")
+
+
+class TestStagingDowngrades:
+    @pytest.fixture
+    def STAGING(self):
+        from validate_library import ValidationStage
+        return ValidationStage.STAGING
+
+    @pytest.mark.parametrize("field_name", ["product-id", "description"])
+    def test_missing_field_is_warn_under_staging(self, STAGING, field_name):
+        tool = make_tool()
+        del tool[field_name]
+        result = validate_library(tools=[tool], library_name="t", stage=STAGING)
+        assert result.passed is True
+        hits = _issues(result, "REQUIRED_FIELD", field_name)
+        assert len(hits) == 1
+        assert hits[0].severity == "WARN"
+        assert STAGING_NOTE in hits[0].message
+        # Original message text is preserved ahead of the note
+        assert hits[0].message.startswith(
+            f"Missing required field '{field_name}' — "
+            f"this tool cannot be deduped in Plex"
+        )
+
+    @pytest.mark.parametrize("field_name", ["product-id", "description"])
+    def test_empty_field_is_warn_under_staging(self, STAGING, field_name):
+        tool = make_tool(**{field_name: "   "})
+        result = validate_library(tools=[tool], library_name="t", stage=STAGING)
+        assert result.passed is True
+        hits = _issues(result, "REQUIRED_FIELD", field_name)
+        assert [h.severity for h in hits] == ["WARN"]
+
+    def test_missing_product_id_note_mentions_plex_skip(self, STAGING):
+        tool = make_tool()
+        del tool["product-id"]
+        result = validate_library(tools=[tool], library_name="t", stage=STAGING)
+        (hit,) = _issues(result, "REQUIRED_FIELD", "product-id")
+        assert "Plex stage will skip this tool" in hit.message
+
+    def test_duplicate_product_id_is_warn_under_staging(self, STAGING):
+        a = make_tool(guid="guid-a")
+        a["product-id"] = "DUP-PID"
+        b = make_tool(guid="guid-b")
+        b["product-id"] = "DUP-PID"
+        result = validate_library(tools=[a, b], library_name="t", stage=STAGING)
+        assert result.passed is True
+        (hit,) = _issues(result, "DUPLICATE_PRODUCT_ID")
+        assert hit.severity == "WARN"
+        assert STAGING_NOTE in hit.message
+        assert hit.message.startswith(
+            'Duplicate product-id "DUP-PID" at indexes 0 and 1 — upsert will collide'
+        )
+
+    def test_duplicate_product_id_does_not_block_iteration(self, STAGING):
+        from validate_library import _check_library_rules
+        a = make_tool(guid="guid-a")
+        b = make_tool(guid="guid-b")  # same default product-id
+        issues: list[ValidationIssue] = []
+        candidates, safe = _check_library_rules(
+            [a, b], issues, None, None, stage=STAGING,
+        )
+        assert safe is True
+        assert len(candidates) == 2
+        # And end-to-end: per-tool rules still ran on both tools
+        del b["vendor"]
+        result = validate_library(tools=[a, b], library_name="t", stage=STAGING)
+        assert _issues(result, "VENDOR_MISSING")
+
+    def test_all_three_downgrades_together_pass(self, STAGING):
+        # The live-library shape: no product-ids, blank descriptions, and
+        # (after enrichment) a shared product-id between two tools.
+        t1 = make_tool(guid="g1", description="")
+        del t1["product-id"]
+        t2 = make_tool(guid="g2")
+        t3 = make_tool(guid="g3")
+        result = validate_library(
+            tools=[t1, t2, t3, make_holder()], library_name="t", stage=STAGING,
+        )
+        assert result.passed is True
+        assert result.fails == []
+        assert {i.rule for i in result.warns} >= {
+            "REQUIRED_FIELD", "DUPLICATE_PRODUCT_ID",
+        }
+
+    # ── rules that stay FAIL under STAGING ──
+
+    @pytest.mark.parametrize("field_name", ["guid", "type"])
+    def test_guid_and_type_still_fail(self, STAGING, field_name):
+        tool = make_tool()
+        del tool[field_name]
+        result = validate_library(tools=[tool], library_name="t", stage=STAGING)
+        assert result.passed is False
+        (hit,) = _issues(result, "REQUIRED_FIELD", field_name)
+        assert hit.severity == "FAIL"
+        assert STAGING_NOTE not in hit.message
+
+    def test_duplicate_guid_still_fails(self, STAGING):
+        a = make_tool(guid="dup")
+        a["product-id"] = "A"
+        b = make_tool(guid="dup")
+        b["product-id"] = "B"
+        result = validate_library(tools=[a, b], library_name="t", stage=STAGING)
+        assert result.passed is False
+        assert _issues(result, "DUPLICATE_GUID")[0].severity == "FAIL"
+
+    @pytest.mark.parametrize("key,rule", [
+        ("DC", "GEOMETRY_DC_NONPOSITIVE"),
+        ("NOF", "GEOMETRY_NOF_NONPOSITIVE"),
+    ])
+    def test_geometry_nonpositive_still_fails(self, STAGING, key, rule):
+        tool = make_tool()
+        tool["geometry"][key] = 0
+        result = validate_library(tools=[tool], library_name="t", stage=STAGING)
+        assert result.passed is False
+        assert _issues(result, rule)[0].severity == "FAIL"
+
+    @pytest.mark.parametrize("tools,rule", [
+        (None, "STRUCT_ROOT_KEY"),
+        ({"not": "a list"}, "STRUCT_DATA_LIST"),
+        ([], "STRUCT_EMPTY"),
+        ([{"guid": "h", "type": "holder"}], "SYNC_CANDIDATES_ZERO"),
+    ])
+    def test_structural_rules_still_fail(self, STAGING, tools, rule):
+        result = validate_library(tools=tools, library_name="t", stage=STAGING)
+        assert result.passed is False
+        assert [i.rule for i in result.fails] == [rule]
+
+    def test_cross_library_duplicate_stays_warn(self, STAGING):
+        tool = make_tool()
+        result = validate_library(
+            tools=[tool], library_name="t", stage=STAGING,
+            cross_library_product_ids={tool["product-id"]: "other"},
+        )
+        assert result.passed is True
+        assert _issues(result, "CROSS_LIBRARY_DUPLICATE")[0].severity == "WARN"
+
+
+class TestPlexStageUnchanged:
+    """Explicit PLEX stage == default == today's behaviour."""
+
+    @pytest.fixture
+    def PLEX(self):
+        from validate_library import ValidationStage
+        return ValidationStage.PLEX
+
+    @pytest.mark.parametrize("field_name", ["product-id", "description"])
+    def test_required_field_still_fails(self, PLEX, field_name):
+        tool = make_tool()
+        del tool[field_name]
+        result = validate_library(tools=[tool], library_name="t", stage=PLEX)
+        assert result.passed is False
+        (hit,) = _issues(result, "REQUIRED_FIELD", field_name)
+        assert hit.severity == "FAIL"
+        assert hit.message == (
+            f"Missing required field '{field_name}' — "
+            f"this tool cannot be deduped in Plex"
+        )
+
+    def test_duplicate_product_id_still_fails(self, PLEX):
+        a = make_tool(guid="guid-a")
+        b = make_tool(guid="guid-b")
+        result = validate_library(tools=[a, b], library_name="t", stage=PLEX)
+        assert result.passed is False
+        (hit,) = _issues(result, "DUPLICATE_PRODUCT_ID")
+        assert hit.severity == "FAIL"
+        assert STAGING_NOTE not in hit.message
+
+    def test_explicit_plex_matches_default(self, PLEX):
+        tool = make_tool(guid="g", description="")
+        del tool["product-id"]
+        default = validate_library(tools=[tool], library_name="t")
+        explicit = validate_library(tools=[tool], library_name="t", stage=PLEX)
+        assert [i.to_dict() for i in default.issues] == [
+            i.to_dict() for i in explicit.issues
+        ]
+        assert default.passed is explicit.passed is False
+
+
+class TestStageInOutput:
+    def test_to_dict_includes_stage(self):
+        from validate_library import ValidationStage
+        r = validate_library(
+            tools=[make_tool()], library_name="L", stage=ValidationStage.STAGING,
+        )
+        assert r.to_dict()["stage"] == "staging"
+        assert validate_library(
+            tools=[make_tool()], library_name="L",
+        ).to_dict()["stage"] == "plex"
+
+    def test_summary_shows_stage(self):
+        from validate_library import ValidationStage
+        r = validate_library(
+            tools=[make_tool()], library_name="L", stage=ValidationStage.STAGING,
+        )
+        assert "stage: staging" in r.summary()
+        assert "stage: plex" in validate_library(
+            tools=[], library_name="L",
+        ).summary()
+
+    def test_format_result_shows_stage(self):
+        from validate_library import ValidationStage
+        tool = make_tool()
+        del tool["product-id"]
+        r = validate_library(
+            tools=[tool], library_name="L", stage=ValidationStage.STAGING,
+        )
+        out = format_result(r, ValidationMode.VERBOSE)
+        assert "stage: staging" in out
+        assert "[WARN] REQUIRED_FIELD" in out
+        pass_out = format_result(
+            validate_library(tools=[make_tool()], library_name="L"),
+            ValidationMode.PRODUCTION,
+        )
+        assert "stage: plex" in pass_out
+
+
+class TestCliStage:
+    @pytest.fixture
+    def lib_missing_pid(self, tmp_path):
+        import json
+        tool = make_tool()
+        del tool["product-id"]
+        f = tmp_path / "LIB.json"
+        f.write_text(json.dumps({"data": [tool]}), encoding="utf-8")
+        return f
+
+    def test_default_stage_is_plex_and_fails(self, lib_missing_pid, capsys):
+        from validate_library import _cli_main
+        rc = _cli_main(["--file", str(lib_missing_pid), "--no-api"])
+        out = capsys.readouterr().out
+        assert rc == 1
+        assert "stage: plex" in out
+
+    def test_stage_staging_passes(self, lib_missing_pid, capsys):
+        from validate_library import _cli_main
+        rc = _cli_main([
+            "--file", str(lib_missing_pid), "--no-api", "--stage", "staging",
+            "--verbose",
+        ])
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert "stage: staging" in out
+        assert STAGING_NOTE in out
+
+    def test_stage_plex_explicit(self, lib_missing_pid, capsys):
+        from validate_library import _cli_main
+        rc = _cli_main(["--file", str(lib_missing_pid), "--no-api", "--stage", "plex"])
+        assert rc == 1
+
+    def test_invalid_stage_rejected(self, lib_missing_pid, capsys):
+        from validate_library import _cli_main
+        with pytest.raises(SystemExit) as exc:
+            _cli_main(["--file", str(lib_missing_pid), "--no-api", "--stage", "bogus"])
+        assert exc.value.code == 2

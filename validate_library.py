@@ -16,6 +16,23 @@ validation engine:
 A ``FAIL`` aborts the sync. ``WARN`` entries are surfaced in verbose/debug
 output and the Flask UI but do not block the sync.
 
+Stages (2026-10-14)
+-------------------
+The same library is validated for two different destinations, selected by
+``stage=ValidationStage.*`` (CLI: ``--stage {plex,staging}``):
+
+  PLEX (default)  The Plex supply-item write, where ``product-id`` is the
+                  dedup key. Missing/empty ``product-id`` or ``description``
+                  and duplicate ``product-id`` are FAILs. This is the
+                  original rule set, unchanged.
+  STAGING         The Supabase upsert done by ``sync.py``. Supabase dedups on
+                  ``fusion_guid``, tolerates empty ``product_id`` and
+                  ``description`` (the Scripts page fixes those), and the Plex
+                  stage (``populate_supply_items.py``) skips any tool without
+                  a ``product_id``. So those three checks are downgraded to
+                  WARN with a "(staging: warn only; ...)" suffix on the
+                  message. Every other rule keeps its PLEX severity.
+
 Full spec: docs/validate_library_spec.md
 """
 
@@ -79,6 +96,41 @@ class ValidationMode(Enum):
     DEBUG      = "debug"        # + field trace
 
 
+class ValidationStage(str, Enum):
+    """Which write the library is being validated for. See module docstring."""
+    PLEX    = "plex"      # Plex supply-item write — product-id is the dedup key
+    STAGING = "staging"   # Supabase upsert (sync.py) — fusion_guid is the dedup key
+
+
+# Rules downgraded FAIL -> WARN at the STAGING stage, keyed by
+# (rule, field). The value is appended to the unchanged PLEX message so a log
+# reader can see why the issue did not fail the library.
+_STAGING_WARN_NOTES: dict[tuple[str, str], str] = {
+    ("REQUIRED_FIELD", "product-id"): (
+        " (staging: warn only; Plex stage will skip this tool)"
+    ),
+    ("REQUIRED_FIELD", "description"): (
+        " (staging: warn only; Supabase accepts an empty description — "
+        "fix it on the Scripts page before the Plex push)"
+    ),
+    ("DUPLICATE_PRODUCT_ID", "product-id"): (
+        " (staging: warn only; Supabase dedups on fusion_guid — "
+        "resolve before the Plex push)"
+    ),
+}
+
+
+def _severity_for(
+    rule: str, field: str, message: str, stage: "ValidationStage",
+) -> tuple[Literal["FAIL", "WARN"], str]:
+    """Severity + message for a FAIL-by-default rule at the given stage."""
+    if stage is ValidationStage.STAGING:
+        note = _STAGING_WARN_NOTES.get((rule, field))
+        if note is not None:
+            return "WARN", message + note
+    return "FAIL", message
+
+
 @dataclass
 class ValidationIssue:
     severity: Literal["FAIL", "WARN"]
@@ -109,6 +161,7 @@ class ValidationResult:
     sync_candidate_count: int
     issues: list[ValidationIssue] = field(default_factory=list)
     debug_trace: list[str] | None = None
+    stage: ValidationStage = ValidationStage.PLEX
 
     @property
     def fails(self) -> list[ValidationIssue]:
@@ -121,25 +174,27 @@ class ValidationResult:
     def summary(self) -> str:
         n_fail = len(self.fails)
         n_warn = len(self.warns)
+        tag = f" [stage: {ValidationStage(self.stage).value}]"
         if self.passed and n_warn == 0:
             return (
                 f"PASS {self.library_name} — "
-                f"{self.sync_candidate_count} tools valid, ready to sync"
+                f"{self.sync_candidate_count} tools valid, ready to sync{tag}"
             )
         if self.passed:
             return (
                 f"PASS {self.library_name} — "
                 f"{self.sync_candidate_count} tools valid "
-                f"({n_warn} warning{'s' if n_warn != 1 else ''})"
+                f"({n_warn} warning{'s' if n_warn != 1 else ''}){tag}"
             )
         parts = [f"{n_fail} error{'s' if n_fail != 1 else ''}"]
         if n_warn:
             parts.append(f"{n_warn} warning{'s' if n_warn != 1 else ''}")
-        return f"FAIL {self.library_name} — FAILED ({', '.join(parts)})"
+        return f"FAIL {self.library_name} — FAILED ({', '.join(parts)}){tag}"
 
     def to_dict(self) -> dict:
         return {
             "library_name": self.library_name,
+            "stage": ValidationStage(self.stage).value,
             "passed": self.passed,
             "tool_count": self.tool_count,
             "sync_candidate_count": self.sync_candidate_count,
@@ -274,12 +329,18 @@ def _check_library_rules(
     issues: list[ValidationIssue],
     cross_library_product_ids: dict[str, str] | None,
     debug_trace: list[str] | None,
+    stage: ValidationStage = ValidationStage.PLEX,
 ) -> tuple[list[dict], bool]:
     """
     Run library-level rules. Returns (sync_candidates, safe_to_iterate).
 
     If safe_to_iterate is False, a library-level FAIL blocked iteration
-    and per-tool rules should NOT run.
+    and per-tool rules should NOT run. Only the structural rules
+    (STRUCT_* / SYNC_CANDIDATES_ZERO) block iteration; DUPLICATE_GUID and
+    DUPLICATE_PRODUCT_ID never do, at either stage.
+
+    ``stage`` only affects DUPLICATE_PRODUCT_ID: FAIL at PLEX, WARN at
+    STAGING (Supabase dedups on fusion_guid, not product-id).
     """
     if debug_trace is not None:
         debug_trace.append("[DEBUG] Running library-level rules")
@@ -378,7 +439,8 @@ def _check_library_rules(
             else:
                 guid_seen[guid] = i
 
-    # DUPLICATE_PRODUCT_ID — sync candidates only
+    # DUPLICATE_PRODUCT_ID — sync candidates only. FAIL at PLEX, WARN at
+    # STAGING (see _STAGING_WARN_NOTES).
     pid_seen: dict[str, int] = {}
     for i, tool in enumerate(data):
         if not isinstance(tool, dict) or not _is_sync_candidate(tool):
@@ -387,17 +449,21 @@ def _check_library_rules(
         if isinstance(pid, str) and pid:
             if pid in pid_seen:
                 prev = pid_seen[pid]
+                severity, message = _severity_for(
+                    "DUPLICATE_PRODUCT_ID",
+                    "product-id",
+                    f'Duplicate product-id "{pid}" at indexes {prev} '
+                    f"and {i} — upsert will collide",
+                    stage,
+                )
                 issues.append(ValidationIssue(
-                    severity="FAIL",
+                    severity=severity,
                     rule="DUPLICATE_PRODUCT_ID",
                     tool_index=i,
                     tool_description=_tool_desc(tool),
                     field="product-id",
                     value=pid,
-                    message=(
-                        f'Duplicate product-id "{pid}" at indexes {prev} '
-                        f"and {i} — upsert will collide"
-                    ),
+                    message=message,
                 ))
             else:
                 pid_seen[pid] = i
@@ -434,20 +500,27 @@ def _check_required_field(
     index: int,
     key: str,
     issues: list[ValidationIssue],
+    stage: ValidationStage = ValidationStage.PLEX,
 ) -> bool:
+    """REQUIRED_FIELD. FAIL at PLEX for every key; at STAGING, 'product-id'
+    and 'description' are WARN (guid and type stay FAIL)."""
     val = tool.get(key)
     if not isinstance(val, str) or not val.strip():
+        severity, message = _severity_for(
+            "REQUIRED_FIELD",
+            key,
+            f"Missing required field '{key}' — "
+            f"this tool cannot be deduped in Plex",
+            stage,
+        )
         issues.append(ValidationIssue(
-            severity="FAIL",
+            severity=severity,
             rule="REQUIRED_FIELD",
             tool_index=index,
             tool_description=_tool_desc(tool),
             field=key,
             value=val,
-            message=(
-                f"Missing required field '{key}' — "
-                f"this tool cannot be deduped in Plex"
-            ),
+            message=message,
         ))
         return False
     return True
@@ -740,6 +813,7 @@ def _check_per_tool_rules(
     issues: list[ValidationIssue],
     supplier_names: list[str] | None,
     debug_trace: list[str] | None,
+    stage: ValidationStage = ValidationStage.PLEX,
 ) -> None:
     """Run per-tool rules. Uses the original index from ``all_tools`` for reporting."""
     for i, tool in enumerate(all_tools):
@@ -751,10 +825,10 @@ def _check_per_tool_rules(
             debug_trace.append(f'[DEBUG] tool {i} "{desc}"')
 
         # Required fields
-        _check_required_field(tool, i, "guid", issues)
-        _check_required_field(tool, i, "type", issues)
-        _check_required_field(tool, i, "description", issues)
-        _check_required_field(tool, i, "product-id", issues)
+        _check_required_field(tool, i, "guid", issues, stage)
+        _check_required_field(tool, i, "type", issues, stage)
+        _check_required_field(tool, i, "description", issues, stage)
+        _check_required_field(tool, i, "product-id", issues, stage)
 
         # Vendor
         _check_vendor_rules(tool, i, issues, supplier_names, debug_trace)
@@ -777,6 +851,7 @@ def validate_library(
     use_api: bool = False,
     client=None,
     cross_library_product_ids: dict[str, str] | None = None,
+    stage: ValidationStage | str = ValidationStage.PLEX,
 ) -> ValidationResult:
     """
     Validate a list of Fusion 360 tool objects against the sync rules.
@@ -803,17 +878,28 @@ def validate_library(
         Optional dict of already-seen product-ids to library names. When
         provided, enables CROSS_LIBRARY_DUPLICATE WARN rule. Used by
         multi-library batch runs.
+    stage
+        ValidationStage.PLEX (default) or ValidationStage.STAGING (a plain
+        "plex"/"staging" string is accepted; anything else raises
+        ValueError). PLEX is the original rule set. STAGING is for the
+        Supabase upsert in ``sync.py``: REQUIRED_FIELD for ``product-id``
+        and ``description`` and DUPLICATE_PRODUCT_ID become WARN (message
+        suffixed "(staging: warn only; ...)"); every other rule is
+        unchanged. The stage is recorded on the result.
 
     Returns
     -------
     ValidationResult
     """
+    stage = ValidationStage(stage)
     issues: list[ValidationIssue] = []
     debug_trace: list[str] | None = [] if mode == ValidationMode.DEBUG else None
+    if debug_trace is not None:
+        debug_trace.append(f"[DEBUG] Validation stage: {stage.value}")
 
     # Library-level rules
     sync_candidates, safe_to_iterate = _check_library_rules(
-        tools, issues, cross_library_product_ids, debug_trace
+        tools, issues, cross_library_product_ids, debug_trace, stage
     )
 
     tool_count = len(tools) if isinstance(tools, list) else 0
@@ -840,6 +926,7 @@ def validate_library(
             issues,
             supplier_names,
             debug_trace,
+            stage,
         )
 
     passed = not any(i.severity == "FAIL" for i in issues)
@@ -851,6 +938,7 @@ def validate_library(
         sync_candidate_count=sync_candidate_count,
         issues=issues,
         debug_trace=debug_trace,
+        stage=stage,
     )
 
 
@@ -881,10 +969,12 @@ def format_result(
     mode: ValidationMode = ValidationMode.PRODUCTION,
 ) -> str:
     """Human-readable CLI output for a single ValidationResult."""
+    stage_tag = f"[stage: {ValidationStage(result.stage).value}]"
     if result.passed and not result.warns:
         return (
             f"[PASS] {result.library_name} - "
-            f"{result.sync_candidate_count} tools valid, ready to sync"
+            f"{result.sync_candidate_count} tools valid, ready to sync "
+            f"{stage_tag}"
         )
 
     header_parts = []
@@ -897,7 +987,7 @@ def format_result(
 
     status = "PASS" if result.passed else "FAIL"
     header = (
-        f"[{status}] {result.library_name}"
+        f"[{status}] {result.library_name} {stage_tag}"
         + (f" - {'FAILED' if not result.passed else 'passed'} "
            f"({', '.join(header_parts)})" if header_parts else "")
     )
@@ -973,7 +1063,19 @@ def _cli_main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Skip live Plex supplier lookup (offline mode)",
     )
+    parser.add_argument(
+        "--stage",
+        choices=[s.value for s in ValidationStage],
+        default=ValidationStage.PLEX.value,
+        help=(
+            "Destination being validated for: 'plex' (default; product-id "
+            "and description required, duplicate product-ids fail) or "
+            "'staging' (the Supabase upsert in sync.py; those three checks "
+            "are warnings)"
+        ),
+    )
     args = parser.parse_args(argv)
+    stage = ValidationStage(args.stage)
 
     if args.debug:
         mode = ValidationMode.DEBUG
@@ -1042,6 +1144,7 @@ def _cli_main(argv: list[str] | None = None) -> int:
     # Run validation across all files with cross-library tracking
     cross_library: dict[str, str] = {}
     all_results: list[ValidationResult] = []
+    print(f"Validation stage: {stage.value}\n")
     for path in files:
         tools = _load_json_file(path)
         result = validate_library(
@@ -1051,6 +1154,7 @@ def _cli_main(argv: list[str] | None = None) -> int:
             use_api=use_api,
             client=client,
             cross_library_product_ids=dict(cross_library) if cross_library else None,
+            stage=stage,
         )
         all_results.append(result)
         print(format_result(result, mode))

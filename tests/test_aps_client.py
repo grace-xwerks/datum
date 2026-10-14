@@ -5,7 +5,7 @@ Focuses on:
   - Config errors when env vars are missing
   - OAuth URL generation
   - Token exchange and refresh mechanics
-  - Token persistence to file
+  - Refresh-token rejection message
   - Hub/project/folder traversal (mocked HTTP)
   - .tools file download via signed S3 URL
   - Storage ID parsing (URN and URL formats)
@@ -29,84 +29,11 @@ from aps_client import (
     APSConfigError,
     APSAuthError,
     APSHTTPError,
-    TokenStore,
 )
 
 
-# ─────────────────────────────────────────────
-# Token store — in-memory (path=None)
-# ─────────────────────────────────────────────
-class TestTokenStore:
-    def test_initially_invalid(self):
-        store = TokenStore(path=None)
-        assert not store.is_valid
-
-    def test_update_makes_valid(self):
-        store = TokenStore(path=None)
-        store.update({
-            "access_token": "tok123",
-            "refresh_token": "ref456",
-            "expires_in": 3600,
-        })
-        assert store.is_valid
-        assert store.access_token == "tok123"
-        assert store.refresh_token == "ref456"
-
-    def test_expired_token_is_invalid(self):
-        store = TokenStore(path=None)
-        store.update({
-            "access_token": "tok",
-            "expires_in": 0,  # already expired (minus 60s buffer)
-        })
-        assert not store.is_valid
-
-    def test_clear_invalidates(self):
-        store = TokenStore(path=None)
-        store.update({"access_token": "tok", "expires_in": 3600})
-        store.clear()
-        assert not store.is_valid
-
-
-# ─────────────────────────────────────────────
-# Token store — file persistence
-# ─────────────────────────────────────────────
-class TestTokenPersistence:
-    def test_save_and_load(self, tmp_path):
-        token_file = tmp_path / ".aps_tokens.json"
-
-        # Save tokens
-        store1 = TokenStore(path=token_file)
-        store1.update({
-            "access_token": "persisted-at",
-            "refresh_token": "persisted-rt",
-            "expires_in": 3600,
-        })
-        assert token_file.exists()
-
-        # Load into a new store
-        store2 = TokenStore(path=token_file)
-        assert store2.access_token == "persisted-at"
-        assert store2.refresh_token == "persisted-rt"
-        assert store2.is_valid
-
-    def test_clear_deletes_file(self, tmp_path):
-        token_file = tmp_path / ".aps_tokens.json"
-        store = TokenStore(path=token_file)
-        store.update({"access_token": "tok", "expires_in": 3600})
-        assert token_file.exists()
-        store.clear()
-        assert not token_file.exists()
-
-    def test_missing_file_is_ok(self, tmp_path):
-        token_file = tmp_path / "nonexistent.json"
-        store = TokenStore(path=token_file)
-        assert not store.is_valid
-
-    def test_corrupt_file_is_ok(self, tmp_path):
-        token_file = tmp_path / ".aps_tokens.json"
-        token_file.write_text("not json", encoding="utf-8")
-        store = TokenStore(path=token_file)
-        assert not store.is_valid
+# Token store tests (FileTokenStore / InfisicalTokenStore / selection) live
+# in tests/test_aps_token_store.py.
 
 
 # ─────────────────────────────────────────────
@@ -213,6 +140,26 @@ class TestRefreshToken:
 
         assert client.tokens.access_token == "new-at"
         assert client.tokens.refresh_token == "new-rt"
+
+    @pytest.mark.parametrize("status", [400, 401])
+    def test_rejected_refresh_says_reseed(self, status):
+        client = APSClient(client_id="id", client_secret="secret", token_path=None)
+        client.tokens.refresh_token = "dead-rt"
+        mock_resp = MagicMock()
+        mock_resp.ok = False
+        mock_resp.status_code = status
+        mock_resp.text = '{"error":"invalid_grant"}'
+
+        with patch.object(client._session, "post", return_value=mock_resp):
+            with pytest.raises(APSAuthError) as exc:
+                client.refresh_access_token()
+
+        msg = str(exc.value)
+        assert "refresh token rejected" in msg
+        assert "datum-aps-consent" in msg
+        assert str(status) in msg
+        assert "dead-rt" not in msg
+        assert not client.tokens.is_valid
 
     def test_no_refresh_token_raises(self):
         client = APSClient(client_id="id", client_secret="secret", token_path=None)

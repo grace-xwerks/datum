@@ -23,6 +23,7 @@ datum-sync-inventory = "sync_tool_inventory:cli"
 datum-ingest-reference = "ingest_reference:main"
 datum-enrich = "enrich:main"
 datum-populate-supply-items = "populate_supply_items:cli"
+datum-aps-consent = "scripts.aps_consent:main"
 datum-plex-mock-serve    = "tools.plex_mock.server:main"
 datum-plex-mock-snapshot = "tools.plex_mock.capture_snapshots:main"
 datum-plex-mock-diff     = "tools.plex_mock.diff:main"
@@ -48,4 +49,4 @@ py-modules = [
 ]
 # Explicit package list — flat root modules use py-modules above;
 # sub-packages with __init__.py are listed here.
-packages = ["tools", "tools.plex_mock"]
+packages = ["tools", "tools.plex_mock", "scripts"]

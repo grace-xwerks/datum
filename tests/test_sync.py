@@ -296,13 +296,74 @@ class TestMain:
     @patch("sync.SupabaseClient")
     @patch("sync.sync_from_local")
     @patch("sync.sync_from_aps", side_effect=APSAuthError("expired"))
-    def test_fallback_to_local_on_auth_error(self, mock_aps, mock_local, _sb, _pop):
+    def test_auth_error_exits_2_without_local_fallback(
+        self, mock_aps, mock_local, _sb, _pop, caplog
+    ):
+        with caplog.at_level(logging.CRITICAL):
+            assert main([]) == 2
+        mock_local.assert_not_called()
+        crit = [r for r in caplog.records if r.levelno == logging.CRITICAL]
+        assert len(crit) == 1
+        msg = crit[0].getMessage()
+        assert "auth" in msg.lower()
+        assert "expired" in msg
+
+    @patch("sync.sync_from_local")
+    @patch("sync.sync_from_aps", side_effect=APSConfigError("no creds"))
+    def test_config_error_exits_2_without_local_fallback(
+        self, mock_aps, mock_local, caplog
+    ):
+        with caplog.at_level(logging.CRITICAL):
+            assert main([]) == 2
+        mock_local.assert_not_called()
+        crit = [r for r in caplog.records if r.levelno == logging.CRITICAL]
+        assert len(crit) == 1
+        msg = crit[0].getMessage()
+        assert "config" in msg.lower()
+        assert "no creds" in msg
+
+    @patch("sync.sync_from_local")
+    @patch("sync.sync_from_aps", side_effect=RuntimeError("kaboom"))
+    def test_generic_error_exits_2_without_local_fallback(
+        self, mock_aps, mock_local, caplog
+    ):
+        with caplog.at_level(logging.CRITICAL):
+            assert main([]) == 2
+        mock_local.assert_not_called()
+        crit = [r for r in caplog.records if r.levelno == logging.CRITICAL]
+        assert len(crit) == 1
+        assert "APS sync failed" in crit[0].getMessage()
+        assert "kaboom" in crit[0].getMessage()
+
+    @patch("sync.populate_supply_items")
+    @patch("sync.SupabaseClient")
+    @patch("sync.sync_from_local")
+    @patch("sync.APSClient")
+    def test_local_flag_never_constructs_aps(
+        self, mock_aps_cls, mock_local, _sb, _pop
+    ):
         report = SyncReport(source="local", start_time=0, end_time=1)
         report.results = [LibraryResult("A", "success", tools=5, presets=10)]
         mock_local.return_value = report
 
-        assert main([]) == 0
+        assert main(["--local"]) == 0
+        mock_aps_cls.assert_not_called()
         mock_local.assert_called_once()
+
+    @patch("sync.bootstrap.format_sources", return_value="PLEX_API_KEY: source=infisical prefix=abcd len=4")
+    @patch("sync.sync_from_aps")
+    def test_startup_logs_credential_sources(self, mock_aps, mock_fmt, caplog):
+        report = SyncReport(source="aps", start_time=0, end_time=1)
+        report.results = [LibraryResult("A", "success", tools=5, message="dry-run")]
+        mock_aps.return_value = report
+
+        with caplog.at_level(logging.INFO):
+            main(["--dry-run"])
+        mock_fmt.assert_called_once_with()
+        assert any(
+            r.levelno == logging.INFO and "source=infisical" in r.getMessage()
+            for r in caplog.records
+        )
 
     @patch("sync.populate_supply_items")
     @patch("sync.SupabaseClient")
@@ -314,12 +375,13 @@ class TestMain:
 
         assert main(["--local"]) == 0
 
-    @patch("sync.sync_from_local")
-    @patch("sync.sync_from_aps", side_effect=APSConfigError("no creds"))
-    def test_exit_2_when_no_libraries(self, mock_aps, mock_local):
-        report = SyncReport(source="local", start_time=0, end_time=1)
+    @patch("sync.populate_supply_items")
+    @patch("sync.SupabaseClient")
+    @patch("sync.sync_from_aps")
+    def test_exit_2_when_no_libraries(self, mock_aps, _sb, _pop):
+        report = SyncReport(source="aps", start_time=0, end_time=1)
         report.results = []
-        mock_local.return_value = report
+        mock_aps.return_value = report
 
         assert main([]) == 2
 

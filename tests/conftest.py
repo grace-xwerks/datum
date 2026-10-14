@@ -33,6 +33,12 @@ os.environ.setdefault("SUPABASE_SERVICE_ROLE_KEY", "test-supabase-key-do-not-use
 os.environ.setdefault("APS_CLIENT_ID", "test-aps-client-id")
 os.environ.setdefault("APS_CLIENT_SECRET", "test-aps-client-secret")
 
+# Keep bootstrap.load_infisical() a no-op under pytest: it would otherwise
+# shell out to the real `infisical` CLI whenever a machine identity file
+# exists on the developer's machine. Tests that exercise the loader delete
+# this with monkeypatch and patch subprocess.run.
+os.environ.setdefault("DATUM_DISABLE_INFISICAL", "1")
+
 
 # ─────────────────────────────────────────────
 # Shared fixtures

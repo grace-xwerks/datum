@@ -278,6 +278,7 @@ _INFISICAL_ENV_VARS = (
     "DATUM_INFISICAL_IDENTITY_FILE",
     "DATUM_INFISICAL_PROJECT_ID",
     "DATUM_INFISICAL_ENV",
+    "DATUM_INFISICAL_PATH",
     "INFISICAL_UNIVERSAL_AUTH_CLIENT_ID",
     "INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET",
 )
@@ -308,10 +309,10 @@ def infisical_env(tmp_path, monkeypatch):
     return identity
 
 
-def _write_identity(path, **extra):
+def _write_identity(identity_path, /, **extra):
     data = {"clientId": "cid-123", "clientSecret": "csecret-456"}
     data.update(extra)
-    path.write_text(json.dumps(data), encoding="utf-8")
+    identity_path.write_text(json.dumps(data), encoding="utf-8")
 
 
 class FakeInfisical:
@@ -446,6 +447,7 @@ class TestInfisicalExport:
         assert "--format=json" in export_args and "--silent" in export_args
         assert "--projectId=proj-file" in export_args
         assert "--env=dev" in export_args  # default environment
+        assert "--path=/datum" in export_args  # default folder
         assert f"--token={_TOKEN}" in export_args
 
         for kw in (login_kw, export_kw):
@@ -465,6 +467,49 @@ class TestInfisicalExport:
         export_args = fake.calls[1][0]
         assert "--projectId=proj-env" in export_args
         assert "--env=prod" in export_args
+
+    def test_export_scoped_to_default_folder(self, infisical_env):
+        _write_identity(infisical_env, projectId="p")
+        fake = FakeInfisical(export_stdout="[]")
+        with patch("bootstrap.subprocess.run", fake):
+            bootstrap.load_infisical()
+        export_args = fake.calls[1][0]
+        assert [a for a in export_args if a.startswith("--path")] == ["--path=/datum"]
+
+    def test_path_env_var_overrides_default(self, infisical_env, monkeypatch):
+        _write_identity(infisical_env, projectId="p", path="/from-file")
+        monkeypatch.setenv("DATUM_INFISICAL_PATH", "/other")
+        fake = FakeInfisical(export_stdout="[]")
+        with patch("bootstrap.subprocess.run", fake):
+            bootstrap.load_infisical()
+        export_args = fake.calls[1][0]
+        assert [a for a in export_args if a.startswith("--path")] == ["--path=/other"]
+
+    def test_path_falls_back_to_identity_file(self, infisical_env):
+        _write_identity(infisical_env, projectId="p", path="/from-file")
+        fake = FakeInfisical(export_stdout="[]")
+        with patch("bootstrap.subprocess.run", fake):
+            bootstrap.load_infisical()
+        export_args = fake.calls[1][0]
+        assert [a for a in export_args if a.startswith("--path")] == ["--path=/from-file"]
+
+    def test_path_with_env_creds_and_no_identity_file(self, infisical_env, monkeypatch):
+        monkeypatch.setenv("INFISICAL_UNIVERSAL_AUTH_CLIENT_ID", "env-cid")
+        monkeypatch.setenv("INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET", "env-csecret")
+        monkeypatch.setenv("DATUM_INFISICAL_PROJECT_ID", "proj-env")
+        fake = FakeInfisical(export_stdout="[]")
+        with patch("bootstrap.subprocess.run", fake):
+            bootstrap.load_infisical()
+        assert "--path=/datum" in fake.calls[1][0]
+
+    def test_path_does_not_change_login(self, infisical_env, monkeypatch):
+        _write_identity(infisical_env, projectId="p")
+        monkeypatch.setenv("DATUM_INFISICAL_PATH", "/other")
+        fake = FakeInfisical(export_stdout="[]")
+        with patch("bootstrap.subprocess.run", fake):
+            bootstrap.load_infisical()
+        login_args = fake.calls[0][0]
+        assert not any(a.startswith("--path") for a in login_args)
 
     def test_list_export_shape(self, infisical_env, monkeypatch):
         _write_identity(infisical_env, projectId="p")

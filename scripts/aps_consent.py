@@ -1,38 +1,59 @@
 """
 scripts/aps_consent.py — console script ``datum-aps-consent``
 =============================================================
-Seed (or re-seed) the production APS refresh token in Infisical.
+Seed (or re-seed) the production APS refresh token.
 
 Run once by a human, and again whenever the nightly sync goes red with
 "refresh token rejected — re-seed with datum-aps-consent"::
 
-    datum-aps-consent                       # interactive
+    datum-aps-consent                       # interactive, Supabase row
     datum-aps-consent --code <code>         # non-interactive (tests)
+    datum-aps-consent --store infisical     # Infisical instead
+
+Where the token goes (``--store``):
+
+  supabase (default)  the ``public.runtime_state`` row ``aps_refresh_token``
+                      in the datum Supabase project, which
+                      ``SupabaseTokenStore`` (``APS_TOKEN_STORE=supabase``)
+                      reads and rotates on every nightly run. Needs
+                      ``SUPABASE_URL`` + ``SUPABASE_SERVICE_ROLE_KEY``.
+  infisical           Infisical ``<env>/APS_REFRESH_TOKEN`` for
+                      ``InfisicalTokenStore``. Kept for completeness.
 
 Steps:
 
-1. Prints the Autodesk authorize URL. Open it, sign in, consent.
-2. Autodesk redirects to ``APS_CALLBACK_URL``. The page need not load (Flask
+1. Checks the destination first, so a misconfiguration never burns an
+   authorization code: for ``supabase``, builds the client and reads the
+   existing row (its value becomes ``previous_value``); for ``infisical``,
+   resolves the project id.
+2. Prints the Autodesk authorize URL. Open it, sign in, consent.
+3. Autodesk redirects to ``APS_CALLBACK_URL``. The page need not load (Flask
    need not be running, and should not be, or it will consume the code);
    copy the ``code`` from the address bar, or paste the whole URL.
-3. Exchanges the code with an in-memory ``FileTokenStore(path=None)``, so
+4. Exchanges the code with an in-memory ``FileTokenStore(path=None)``, so
    no ``.aps_tokens.json`` is written.
-4. Writes the refresh token to Infisical ``<env>/APS_REFRESH_TOKEN``
-   through ``aps_client.infisical_set_secret`` — the same write path
-   ``InfisicalTokenStore`` uses (value via a 0600 temp file, never argv).
+5. Writes the refresh token:
 
-Infisical auth: if ``INFISICAL_UNIVERSAL_AUTH_CLIENT_ID/SECRET`` are in the
-environment, a machine-identity token is minted and passed as ``--token``;
-otherwise ``--token`` is omitted and the CLI uses your own ``infisical
-login`` session (fine here: this is interactive and one-shot).
+   - ``supabase``: ``aps_client.supabase_set_runtime_state`` — the same
+     upsert ``SupabaseTokenStore`` uses — with ``previous_value`` carried
+     from the existing row and ``updated_by="datum-aps-consent"``.
+   - ``infisical``: ``aps_client.infisical_set_secret`` — the same write
+     path ``InfisicalTokenStore`` uses (value via a 0600 temp file, never
+     argv).
 
-Project id: ``--project-id`` > ``DATUM_INFISICAL_PROJECT_ID`` >
-``"projectId"`` in ``~/.config/datum/infisical-identity.json``.
-Environment: ``--env``, default ``prod`` (deliberately not
-``DATUM_INFISICAL_ENV``, which is ``dev`` on a workstation).
+Infisical auth (``--store infisical`` only): if
+``INFISICAL_UNIVERSAL_AUTH_CLIENT_ID/SECRET`` are in the environment, a
+machine-identity token is minted and passed as ``--token``; otherwise
+``--token`` is omitted and the CLI uses your own ``infisical login`` session
+(fine here: this is interactive and one-shot). Project id: ``--project-id``
+> ``DATUM_INFISICAL_PROJECT_ID`` > ``"projectId"`` in
+``~/.config/datum/infisical-identity.json``. Environment: ``--env``, default
+``prod`` (deliberately not ``DATUM_INFISICAL_ENV``, which is ``dev`` on a
+workstation).
 
-Prints ``seeded APS_REFRESH_TOKEN (prefix xxxxxxxx…, len N)``; never prints
-the token. Exit 0 on success, 1 on failure with one line on stderr.
+Prints ``seeded <where> (prefix xxxxxxxx…, len N)`` where ``<where>`` is
+``public.runtime_state[aps_refresh_token]`` or ``APS_REFRESH_TOKEN``; never
+prints the token. Exit 0 on success, 1 on failure with one line on stderr.
 """
 from __future__ import annotations
 
@@ -50,15 +71,24 @@ if str(ROOT) not in sys.path:
 
 import aps_client  # noqa: E402
 from aps_client import (  # noqa: E402
+    SUPABASE_TOKEN_KEY,
     APSClient,
     FileTokenStore,
+    RuntimeStateError,
     has_universal_auth_identity,
     infisical_login_universal_auth,
     infisical_set_secret,
+    supabase_get_runtime_state,
+    supabase_set_runtime_state,
 )
+from supabase_client import SupabaseClient, SupabaseConfigError  # noqa: E402
 
 KEY = "APS_REFRESH_TOKEN"
 DEFAULT_ENV = "prod"
+STORE_SUPABASE = "supabase"
+STORE_INFISICAL = "infisical"
+DEFAULT_STORE = STORE_SUPABASE
+UPDATED_BY = "datum-aps-consent"
 IDENTITY_FILE = Path.home() / ".config" / "datum" / "infisical-identity.json"
 
 
@@ -106,23 +136,36 @@ def _extract_code(text: str) -> str:
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     p = argparse.ArgumentParser(
         prog="datum-aps-consent",
-        description="Seed the APS refresh token in Infisical (prod).",
+        description="Seed the production APS refresh token (Supabase "
+                    "public.runtime_state by default, or Infisical).",
     )
     p.add_argument("--code", help="authorization code (or full callback URL); "
                    "prompted for when omitted")
-    p.add_argument("--project-id", help="Infisical project id "
-                   "(default: DATUM_INFISICAL_PROJECT_ID)")
+    p.add_argument("--store", choices=(STORE_SUPABASE, STORE_INFISICAL),
+                   default=DEFAULT_STORE,
+                   help=f"where to seed the token (default: {DEFAULT_STORE})")
+    p.add_argument("--project-id", help="Infisical project id, --store infisical "
+                   "only (default: DATUM_INFISICAL_PROJECT_ID)")
     p.add_argument("--env", default=DEFAULT_ENV,
-                   help=f"Infisical environment (default: {DEFAULT_ENV})")
+                   help=f"Infisical environment, --store infisical only "
+                   f"(default: {DEFAULT_ENV})")
     p.add_argument("--client-id", help="APS client id (default: APS_CLIENT_ID)")
     p.add_argument("--client-secret",
                    help="APS client secret (default: APS_CLIENT_SECRET)")
     return p.parse_args(argv)
 
 
-def _run(args: argparse.Namespace) -> str:
-    """Do the work; return the seeded refresh token (for the summary line)."""
-    project_id = _resolve_project_id(args.project_id)
+def _run(args: argparse.Namespace) -> tuple[str, str]:
+    """Do the work; return (where, seeded refresh token) for the summary line."""
+    # 1. Check the destination before consent, so a bad config or an
+    #    unreachable/missing table never burns an authorization code.
+    if args.store == STORE_SUPABASE:
+        sb = SupabaseClient()
+        previous = supabase_get_runtime_state(sb, SUPABASE_TOKEN_KEY)
+        where = f"public.{aps_client.RUNTIME_STATE_TABLE}[{SUPABASE_TOKEN_KEY}]"
+    else:
+        project_id = _resolve_project_id(args.project_id)
+        where = KEY
 
     client = APSClient(
         client_id=args.client_id,
@@ -152,27 +195,33 @@ def _run(args: argparse.Namespace) -> str:
     if not refresh_token:
         raise ConsentError("Autodesk returned no refresh token")
 
-    token = infisical_login_universal_auth() if has_universal_auth_identity() else None
-    infisical_set_secret(project_id, args.env, KEY, refresh_token, token=token)
-    return refresh_token
+    if args.store == STORE_SUPABASE:
+        supabase_set_runtime_state(
+            sb, SUPABASE_TOKEN_KEY, refresh_token,
+            previous_value=previous, updated_by=UPDATED_BY,
+        )
+    else:
+        token = infisical_login_universal_auth() if has_universal_auth_identity() else None
+        infisical_set_secret(project_id, args.env, KEY, refresh_token, token=token)
+    return where, refresh_token
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
-    refresh_token: str | None = None
     try:
-        refresh_token = _run(args)
+        where, refresh_token = _run(args)
     except KeyboardInterrupt:
         print("datum-aps-consent: failed: interrupted", file=sys.stderr)
         return 1
     except (ConsentError, aps_client.APSConfigError, aps_client.APSAuthError,
-            aps_client.InfisicalCLIError) as e:
+            aps_client.InfisicalCLIError, RuntimeStateError,
+            SupabaseConfigError) as e:
         print(f"datum-aps-consent: failed: {e}", file=sys.stderr)
         return 1
     except Exception as e:  # one clear line, never a traceback with secrets
         print(f"datum-aps-consent: failed: {type(e).__name__}: {e}", file=sys.stderr)
         return 1
-    print(f"seeded {KEY} (prefix {refresh_token[:8]}…, len {len(refresh_token)})")
+    print(f"seeded {where} (prefix {refresh_token[:8]}…, len {len(refresh_token)})")
     return 0
 
 

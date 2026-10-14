@@ -381,7 +381,7 @@ class InfisicalTokenStore(BaseTokenStore):
         self.project_id = (
             project_id or os.environ.get("DATUM_INFISICAL_PROJECT_ID", "")
         ).strip()
-        self.env = (env or os.environ.get("DATUM_INFISICAL_ENV", "") or "prod").strip()
+        self.env = (env or os.environ.get("DATUM_INFISICAL_ENV", "")).strip() or "prod"
         self.key = key
         if not self.project_id:
             raise APSConfigError(

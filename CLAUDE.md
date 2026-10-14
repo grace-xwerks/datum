@@ -39,17 +39,35 @@ repository. **Read these files in this order before doing anything**:
    `datum` Supabase project (us-east-2) before anything pushes to Plex.
    Schema spec: [Notion · Supabase Schema Design](https://www.notion.so/33c3160a3abf814c885cc174cda76d17).
    Code: `supabase_client.py`, `sync_supabase.py`, `scripts/load_sample.py`.
-   Credentials: `SUPABASE_URL` + `SUPABASE_SERVICE_ROLE_KEY` in `.env.local`.
+   Credentials: `SUPABASE_URL` + `SUPABASE_SERVICE_ROLE_KEY`, from Infisical
+   (`/datum`) via `bootstrap.py`, with `.env.local` as the local fallback.
    Issue #31. Downstream (`build_supply_item_payload`, #3) reads from
    the `tools` table, not raw JSON.
+
+8. **[`docs/SECRETS.md`](./docs/SECRETS.md)** — operator reference for
+   credentials and the nightly sync: where every secret lives, the Infisical
+   identity model, local setup, the APS refresh-token lifecycle, what each
+   red-run message means, and the rotation runbooks. **Read this before
+   touching credentials, the nightly workflow, or the token stores in
+   `aps_client.py`.** Never put a secret value in it or in any other doc.
 
 ## Hard rules
 
 - **Never read credentials from images.** Always have the user paste them
   as text or via Insomnia "Generate Code" output. We learned this the
   hard way (see BRIEFING.md "History of incorrect hypotheses §1").
-- **Never hardcode credentials.** They live in `.env.local` (gitignored),
-  loaded by `bootstrap.py`. Production deploy uses real shell env vars.
+- **Never hardcode credentials. Never commit them.** Credentials come from
+  **Infisical** (Grace Engineering project, folder `/datum`, envs `dev` and
+  `prod`), loaded by `bootstrap.py`'s three-source loader. Precedence is
+  **shell env > Infisical > `.env.local`**. `.env.local` (gitignored) is the
+  local fallback only. Local Infisical access uses the machine-identity file
+  `~/.config/datum/infisical-identity.json` (`clientId`, `clientSecret`,
+  `projectId`, optional `path`); it lives outside the repo, and neither it nor
+  `.env.local` is ever committed. Production (the nightly GitHub Actions
+  runner) gets plain repository secrets that Infisical syncs into GitHub; it
+  has no Infisical CLI or identity. The rotating APS refresh token lives in
+  Supabase (`public.runtime_state`), not Infisical. Details:
+  `docs/SECRETS.md`.
 - **Never bypass the production write guard.** Mutating HTTP methods on
   `connect.plex.com` are refused at `/api/plex/raw` unless
   `PLEX_ALLOW_WRITES=1` is explicitly set in the environment.
@@ -72,8 +90,25 @@ repository. **Read these files in this order before doing anything**:
 # Run the local endpoint tester (overrides shell env from .env.local)
 py run_dev.py
 
-# Run tests
-py -m pytest
+# Run tests. Use the repo venv: bare `py` lacks Flask on Shane's machine, so
+# collection fails there. (583 tests as of 2026-10-14.)
+.venv\Scripts\python -m pytest
+
+# Auth is confusing? Run this first. It prints, per credential, whether the
+# value came from shell, infisical, .env.local or unset (8-char prefix and
+# length only). Same data: `py run_dev.py` -> Diagnostics preset
+# (tenant_whoami -> credential_sources), and the "Credential sources:" block
+# that datum-sync logs at startup.
+.venv\Scripts\python -c "import bootstrap; print(bootstrap.format_sources())"
+
+# Seed / re-seed the production APS refresh token (Supabase row
+# public.runtime_state[aps_refresh_token]). Needed once, and whenever the
+# nightly sync reports "refresh token rejected".
+datum-aps-consent                      # --store infisical for the Infisical store
+
+# Run the nightly sync on Actions now (add -f dry_run=true for a dry run;
+# a dry run still rotates the APS refresh token)
+gh workflow run nightly-sync.yml --repo grace-xwerks/datum
 
 # Open a PR with auto-merge
 gh pr create --base master --head claude/my-branch --title "..." --body "..."
@@ -103,6 +138,10 @@ gh pr merge <number> --auto --squash
   Plex_API_Reference.md. Read them; don't guess.
 - Claude Code has a built-in `tenant_whoami` diagnostic at
   `/api/diagnostics/tenant` — run that first whenever the connection
-  state is unclear.
+  state is unclear. Its `credential_sources` field (also
+  `bootstrap.format_sources()`) says which source — shell, Infisical,
+  `.env.local` — supplied each credential, which is the first thing to
+  check when auth is confusing.
+- Nightly sync red, or anything credential-shaped: `docs/SECRETS.md`.
 - Open a PR. CI is fast (~10s) and branch protection guarantees you
   can't break master.

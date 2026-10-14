@@ -18,7 +18,8 @@ The React UI reads from Supabase; Plex gets only what its schema can accept.
 | **Workcenters** | `production/v1/production-definitions/workcenters` (143 records, including 21 mills mapping directly to Brother Speedio FTP IPs) |
 | **Supabase** | dedicated `datum` project (us-east-2), 3 tables — `libraries`, `tools`, `cutting_presets` |
 | **Phase** | **Phase B complete** — `validate_library.py` pre-sync gate landed (#25). Phase A-Python (Supabase upsert layer) is next. |
-| **Tests** | 215 pytest tests, all green. CI on PRs to master via GitHub Actions. Branch protection requires the check to pass. |
+| **Tests** | 583 pytest tests, all green (2026-10-14). CI on PRs to master via GitHub Actions. Branch protection requires the check to pass. |
+| **Nightly sync** | Runs on GitHub Actions (`.github/workflows/nightly-sync.yml`, 00:17 America/Chicago in CDT). Rollout in progress; see [Deployment and operations](#deployment-and-operations). |
 
 ## Architecture
 
@@ -47,22 +48,34 @@ The original plan to write to `mdm/v1/parts` and `tooling/v1/tool-assemblies` wa
 
 ## Quick start (local development)
 
-1. **Clone and create your `.env.local`**
+1. **Clone and set up credentials**
 
    ```powershell
    git clone https://github.com/grace-xwerks/datum.git
    cd datum
-   copy .env.example .env.local
-   # Edit .env.local with your Datum Consumer Key + Secret
    ```
 
-   `.env.local` is gitignored. Get the Consumer Key from
-   [developers.plex.com](https://developers.plex.com/) → My Apps → Datum.
+   Credentials load through `bootstrap.py` from three sources, highest
+   precedence first: **shell environment, Infisical, `.env.local`**.
+
+   - **Infisical (preferred).** Install the Infisical CLI and put a machine
+     identity file at `~/.config/datum/infisical-identity.json`
+     (`clientId`, `clientSecret`, `projectId`). Datum's keys are folder
+     `/datum` of the Grace Engineering Infisical project (`dev` env by
+     default). Setup, variables and the identity model are in
+     [`docs/SECRETS.md`](./docs/SECRETS.md).
+   - **`.env.local` (fallback).** `copy .env.example .env.local` and fill in
+     your Datum Consumer Key + Secret from
+     [developers.plex.com](https://developers.plex.com/) → My Apps → Datum.
+
+   `.env.local` and the identity file are never committed. With neither
+   present, nothing loads and the code runs unconfigured.
 
 2. **Install dependencies**
 
    ```powershell
-   py -m pip install -r requirements-dev.txt
+   py -m venv .venv
+   .venv\Scripts\python -m pip install -r requirements-dev.txt
    ```
 
 3. **Run the local endpoint tester**
@@ -79,13 +92,18 @@ The original plan to write to `mdm/v1/parts` and `tooling/v1/tool-assemblies` wa
 
    `run_dev.py` overrides shell environment variables with `.env.local` (the opposite of
    `bootstrap.py`'s production-safe `setdefault` semantics), so a stale system env var won't
-   silently shadow your real key.
+   silently shadow your real key. It skips any key Infisical supplied, so a stale `.env.local`
+   can't beat Infisical either. To see which source supplied each credential, use the
+   Diagnostics preset (`credential_sources`) or
+   `.venv\Scripts\python -c "import bootstrap; print(bootstrap.format_sources())"`.
 
 4. **Run tests**
 
    ```powershell
-   py -m pytest
+   .venv\Scripts\python -m pytest
    ```
+
+   Use the venv: bare `py` may lack Flask and fail at collection.
 
 5. **Validate a Fusion library before syncing**
 
@@ -104,6 +122,31 @@ The original plan to write to `mdm/v1/parts` and `tooling/v1/tool-assemblies` wa
    unknown tool types, and vendors that won't resolve to a Plex supplier. The sync layer gates on
    a PASS; FAILs abort the sync before anything touches Supabase or Plex. Full rule table in
    [`docs/validate_library_spec.md`](./docs/validate_library_spec.md).
+
+## Deployment and operations
+
+The **nightly sync runs on GitHub Actions**, not on a local machine. It replaces the two
+GRACE144 Windows Task Scheduler jobs, which stopped writing on 2026-04-10 and are being
+retired ([#18](https://github.com/grace-xwerks/datum/issues/18)).
+
+- **Workflow:** `.github/workflows/nightly-sync.yml`. Cron `17 5 * * *` UTC (00:17
+  America/Chicago in CDT). It runs `datum-sync` (Fusion tool libraries from Autodesk APS into
+  Supabase), then `datum-sync-inventory`. A failure is a red run with the log tail in the step
+  summary and the full log as a 14-day artifact.
+- **Run it by hand:** `gh workflow run nightly-sync.yml --repo grace-xwerks/datum`, or add
+  `-f dry_run=true` to validate without writing libraries. A dry run still rotates the APS
+  refresh token.
+- **Secrets:** plain repository secrets that Infisical syncs into GitHub (`prod`, `/datum`).
+  The runner has no Infisical access. The rotating APS refresh token is not a secret in
+  either place: it lives in the Supabase table `public.runtime_state` and is rewritten on every
+  run. Seed or re-seed it with `datum-aps-consent`.
+- **Local runs** (`py sync.py`, `datum-sync`) use APS as the only source and read the same
+  `bootstrap.py` sources as dev. The old fallback to local Fusion files is now explicit-only
+  (`--local`).
+
+Everything an operator needs (where each secret lives, the token lifecycle, what each failure
+message means, rotation runbooks, the Infisical setup checklist) is in
+[`docs/SECRETS.md`](./docs/SECRETS.md).
 
 ## Production safety
 
@@ -128,6 +171,8 @@ protect against accidental writes:
 
 - [`docs/BRIEFING.md`](./docs/BRIEFING.md) — primary context document for AI-assisted dev sessions and the
   source of truth for current status, current credentials, gotchas, and project history
+- [`docs/SECRETS.md`](./docs/SECRETS.md) — credentials, Infisical, the APS refresh-token lifecycle,
+  and the nightly sync runbook
 - [`docs/Plex_API_Reference.md`](./docs/Plex_API_Reference.md) — verified endpoint access matrix and URL
   pattern conventions
 - [`docs/Fusion360_Tool_Library_Reference.md`](./docs/Fusion360_Tool_Library_Reference.md) — Fusion JSON

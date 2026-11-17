@@ -330,6 +330,122 @@ class TestDownloadToolLibrary:
 
 
 # ─────────────────────────────────────────────
+# Download retry on transient failures
+# ─────────────────────────────────────────────
+_URN = "urn:adsk.objects:os.object:wip.dm.prod/lib.json"
+
+
+def _resp(ok=True, status=200, json_body=None, content=b"", headers=None):
+    r = MagicMock()
+    r.ok = ok
+    r.status_code = status
+    r.json.return_value = json_body or {}
+    r.text = "err"
+    r.content = content
+    r.url = "https://example.invalid/x"
+    r.headers = headers or {}
+    return r
+
+
+class TestDownloadRetry:
+    def _client(self):
+        sleeps: list[float] = []
+        client = _authed_client()
+        client._sleep = sleeps.append
+        return client, sleeps
+
+    def _patch_s3(self, client, s3_outcomes):
+        """Sign step always succeeds; S3 GET yields s3_outcomes in order."""
+        sign = _resp(json_body={"url": "https://s3.signed.example.com/f?sig=SECRET"})
+        outcomes = iter(s3_outcomes)
+        s3_calls = []
+
+        def side_effect(url, **kwargs):
+            if "signeds3download" in url:
+                return sign
+            s3_calls.append(url)
+            out = next(outcomes)
+            if isinstance(out, BaseException):
+                raise out
+            return out
+
+        return patch.object(client._session, "get", side_effect=side_effect), s3_calls
+
+    def test_connection_drop_then_success(self, caplog):
+        import http.client
+        import requests
+
+        client, sleeps = self._client()
+        drop = requests.ConnectionError(
+            ("Connection aborted.", http.client.RemoteDisconnected("closed"))
+        )
+        p, calls = self._patch_s3(client, [drop, _resp(content=b"payload")])
+        with p, caplog.at_level("WARNING", logger="aps_client"):
+            assert client.download_version(_URN) == b"payload"
+
+        assert len(calls) == 2
+        assert sleeps == [2.0]
+        assert "attempt 1/3" in caplog.text
+        assert "ConnectionError" in caplog.text
+        assert "SECRET" not in caplog.text  # signed URL never logged
+
+    def test_timeout_and_503_then_success(self):
+        import requests
+
+        client, sleeps = self._client()
+        p, calls = self._patch_s3(client, [
+            requests.Timeout("slow"),
+            _resp(ok=False, status=503),
+            _resp(content=b"ok"),
+        ])
+        with p:
+            assert client.download_version(_URN) == b"ok"
+        assert len(calls) == 3
+        assert sleeps == [2.0, 4.0]
+
+    def test_429_honours_retry_after(self):
+        client, sleeps = self._client()
+        p, _ = self._patch_s3(client, [
+            _resp(ok=False, status=429, headers={"Retry-After": "7"}),
+            _resp(content=b"ok"),
+        ])
+        with p:
+            assert client.download_version(_URN) == b"ok"
+        assert sleeps == [7.0]
+
+    def test_persistent_transient_fails_after_max_attempts(self):
+        import requests
+
+        client, sleeps = self._client()
+        p, calls = self._patch_s3(
+            client, [requests.ConnectionError("drop")] * 5,
+        )
+        with p, pytest.raises(requests.ConnectionError):
+            client.download_version(_URN)
+        assert len(calls) == 3
+        assert sleeps == [2.0, 4.0]
+
+    @pytest.mark.parametrize("status", [401, 403, 404])
+    def test_auth_and_not_found_not_retried(self, status):
+        client, sleeps = self._client()
+        p, calls = self._patch_s3(client, [_resp(ok=False, status=status)] * 3)
+        with p, pytest.raises(APSHTTPError) as exc:
+            client.download_version(_URN)
+        assert exc.value.status == status
+        assert len(calls) == 1
+        assert sleeps == []
+
+    def test_sign_step_404_not_retried(self):
+        client, sleeps = self._client()
+        with patch.object(
+            client._session, "get", return_value=_resp(ok=False, status=404),
+        ) as get, pytest.raises(APSHTTPError):
+            client.download_version(_URN)
+        assert get.call_count == 1
+        assert sleeps == []
+
+
+# ─────────────────────────────────────────────
 # Auto-refresh
 # ─────────────────────────────────────────────
 class TestAutoRefresh:

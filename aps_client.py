@@ -99,11 +99,41 @@ class APSAuthError(RuntimeError):
 class APSHTTPError(RuntimeError):
     """Raised when an APS API call returns a non-2xx response."""
 
-    def __init__(self, status: int, body: Any, url: str):
+    def __init__(
+        self, status: int, body: Any, url: str, retry_after: str | None = None,
+    ):
         self.status = status
         self.body = body
         self.url = url
+        self.retry_after = retry_after  # raw Retry-After header, if any
         super().__init__(f"APS {status} on {url}: {body}")
+
+
+# Download retry policy. A single dropped connection to APS/S3 used to fail
+# the whole nightly sync (2026-11-15: RemoteDisconnected on one library).
+# Only transient failures are retried; auth / not-found errors fail fast.
+DOWNLOAD_MAX_ATTEMPTS = 3
+DOWNLOAD_BACKOFF_BASE = 2.0      # seconds: waits 2s, then 4s
+DOWNLOAD_RETRY_AFTER_CAP = 60.0  # never honour a Retry-After longer than this
+RETRYABLE_STATUSES = frozenset({429, 502, 503, 504})
+
+
+def _is_transient(exc: BaseException) -> bool:
+    """True for errors worth retrying: connection drops, timeouts, 429/5xx."""
+    if isinstance(exc, (requests.ConnectionError, requests.Timeout)):
+        return True
+    return isinstance(exc, APSHTTPError) and exc.status in RETRYABLE_STATUSES
+
+
+def _retry_after_seconds(exc: BaseException) -> float | None:
+    """Parse a numeric Retry-After header off an APSHTTPError, capped."""
+    raw = getattr(exc, "retry_after", None)
+    if raw is None:
+        return None
+    try:
+        return min(max(float(raw), 0.0), DOWNLOAD_RETRY_AFTER_CAP)
+    except (TypeError, ValueError):
+        return None  # HTTP-date form: fall back to exponential backoff
 
 
 # ─────────────────────────────────────────────
@@ -712,8 +742,10 @@ class APSClient:
         timeout: int = DEFAULT_TIMEOUT,
         token_path: Path | None | str = _DEFAULT_TOKEN_PATH,
         token_store: BaseTokenStore | None = None,
+        sleep: Any = time.sleep,
     ):
         self.client_id = client_id or APS_CLIENT_ID
+        self._sleep = sleep  # injectable so retry tests don't actually sleep
         self.client_secret = client_secret or APS_CLIENT_SECRET
         self.callback_url = callback_url or APS_CALLBACK_URL
         self.timeout = timeout
@@ -856,7 +888,10 @@ class APSClient:
                 body = resp.json()
             except ValueError:
                 body = resp.text
-            raise APSHTTPError(resp.status_code, body, resp.url)
+            raise APSHTTPError(
+                resp.status_code, body, resp.url,
+                retry_after=resp.headers.get("Retry-After"),
+            )
         return resp.json()
 
     def _get_binary(self, url: str) -> bytes:
@@ -944,7 +979,33 @@ class APSClient:
 
         Uses the signed S3 download endpoint (the old direct OSS v2
         GET is deprecated and returns 403).
+
+        Transient failures (connection drops, timeouts, HTTP 429/502/503/504)
+        are retried up to ``DOWNLOAD_MAX_ATTEMPTS`` times with exponential
+        backoff, honouring Retry-After. Each attempt re-signs, so a retry
+        never reuses a stale signed URL. Other errors raise immediately.
         """
+        for attempt in range(1, DOWNLOAD_MAX_ATTEMPTS + 1):
+            try:
+                return self._download_version_once(storage_url)
+            except Exception as e:
+                if not _is_transient(e) or attempt == DOWNLOAD_MAX_ATTEMPTS:
+                    raise
+                delay = _retry_after_seconds(e)
+                if delay is None:
+                    delay = DOWNLOAD_BACKOFF_BASE * (2 ** (attempt - 1))
+                # Class + status only: the message can carry a signed URL.
+                log.warning(
+                    "  download attempt %d/%d failed (%s%s); retrying in %.0fs",
+                    attempt, DOWNLOAD_MAX_ATTEMPTS, type(e).__name__,
+                    f" {e.status}" if isinstance(e, APSHTTPError) else "",
+                    delay,
+                )
+                self._sleep(delay)
+        raise AssertionError("unreachable")  # pragma: no cover
+
+    def _download_version_once(self, storage_url: str) -> bytes:
+        """One sign-then-fetch attempt. See ``download_version``."""
         # Parse bucket and object key from URN or URL
         bucket, obj_key = self._parse_storage_id(storage_url)
         if not bucket or not obj_key:
@@ -969,7 +1030,10 @@ class APSClient:
         # Download from S3 (no auth header needed — the URL is pre-signed)
         resp = self._session.get(signed_url, timeout=self.timeout)
         if not resp.ok:
-            raise APSHTTPError(resp.status_code, resp.text, signed_url)
+            raise APSHTTPError(
+                resp.status_code, resp.text, signed_url,
+                retry_after=resp.headers.get("Retry-After"),
+            )
         return resp.content
 
     @staticmethod
